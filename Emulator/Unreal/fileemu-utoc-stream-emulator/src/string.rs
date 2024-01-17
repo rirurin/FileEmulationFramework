@@ -17,7 +17,7 @@ pub trait FStringDeserializer {
 pub trait FStringSerializer {
     // Take a string and convert into a byte stream that can be written out onto a file
     // Don't consume it, in case that string needs to be written multiple times
-    fn to_buffer<W: Write, E: byteorder::ByteOrder>(rstr: &str, writer: &mut W) -> Result<(), Box<dyn Error>>;
+    fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(rstr: &str, writer: &mut W) -> Result<(), Box<dyn Error>>;
 }
 
 pub trait FStringSerializerText {
@@ -25,12 +25,12 @@ pub trait FStringSerializerText {
     // This exists for types that store their string and hash in separate blocks, as is the case with strings in IO store packages
     // Since this doesn't happen with PAK package strings and we're only interested in converting from PAK -> IO Store, there's 
     // currently no need for a Text and Hash variation for Deserializer
-    fn to_buffer_text<W: Write, E: byteorder::ByteOrder>(rstr: &str, writer: &mut W) -> Result<(), Box<dyn Error>>;
+    fn to_buffer_text<W: Write + Seek, E: byteorder::ByteOrder>(rstr: &str, writer: &mut W) -> Result<(), Box<dyn Error>>;
 }
 pub trait FStringSerializerHash {
     // Take the hash portion of a string and convert it into a byte stream that can be written out to
     // I'm not writing out the same description again
-    fn to_buffer_hash<W: Write, E: byteorder::ByteOrder>(rstr: &str, writer: &mut W) -> Result<(), Box<dyn Error>>;
+    fn to_buffer_hash<W: Write + Seek, E: byteorder::ByteOrder>(rstr: &str, writer: &mut W) -> Result<(), Box<dyn Error>>;
 }
 
 pub trait FStringSerializerBlockAlign {
@@ -208,6 +208,33 @@ impl Hasher {
     fn get_cityhash64(bytes: &str) -> u64 {
         let to_hash = String::from(bytes).to_lowercase();
         cityhasher::hash(to_hash.as_bytes())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct FMappedName(u32, u32); // NameIndex, ExtraIndex
+// first field is index in name map
+
+impl FMappedName {
+    pub fn get_name_index(&self) -> u32 {
+        self.0
+    }
+    pub fn get_extra_index(&self) -> u32 {
+        self.1
+    }
+}
+
+impl From<u64> for FMappedName {
+    fn from(value: u64) -> Self {
+        let name_index: u32 = (value & u32::MAX as u64) as u32;
+        let extra_index: u32 = ((value >> 0x20) & u32::MAX as u64) as u32;
+        Self(name_index, extra_index)
+    }
+}
+
+impl From<FMappedName> for u64 {
+    fn from(value: FMappedName) -> Self {
+        value.0 as u64 | (value.1 as u64) << 0x20
     }
 }
 

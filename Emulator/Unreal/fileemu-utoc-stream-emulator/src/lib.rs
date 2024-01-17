@@ -48,9 +48,9 @@ mod tests {
     use byteorder::{ReadBytesExt, WriteBytesExt};
     use crate::{
         io_package::{FPackageObjectIndex, FPackageObjectIndexType, ObjectImport, ObjectExportWriter, ObjectExport2},
-        pak_package::{FObjectImport, FObjectExport, NameMap},
+        pak_package::{FObjectImport, FObjectExport, NameMap, NameMapImpl},
         partition::{GameName, GameNameImpl},
-        string::{FStringDeserializer, FStringSerializer, FString16, FString32}
+        string::{FStringDeserializer, FStringSerializer, FStringSerializerText, FString16, FString32}
     };
     use std::{
         fs::File,
@@ -58,128 +58,72 @@ mod tests {
             Cursor, Read, Write
         },
     };
-    // Testing globals
-    // Input: "/Game/StarterContent/Textures/T_Chair_M" from .uasset
-    // Length: 40
-    // Value: /Game/StarterContent/Textures/T_Chair_M
-    // Hash: 0x11D8DC31
-    pub const T_CHAIR_MAT_PAK_NAME: [u8; 48] = 
-        [0x28, 0x00, 0x00, 0x00, 0x2F, 0x47, 0x61, 0x6D, 0x65, 0x2F, 0x53, 0x74, 0x61, 0x72, 0x74, 0x65,
-        0x72, 0x43, 0x6F, 0x6E, 0x74, 0x65, 0x6E, 0x74, 0x2F, 0x54, 0x65, 0x78, 0x74, 0x75, 0x72, 0x65,
-        0x73, 0x2F, 0x54, 0x5F, 0x43, 0x68, 0x61, 0x69, 0x72, 0x5F, 0x4D, 0x00, 0x31, 0xDC, 0xD8, 0x11]
-    ;
+    type NE = byteorder::NativeEndian;
+    type CV = Cursor<Vec<u8>>;
+
+    fn get_test_file(file: &str) -> Vec<u8> {
+        let mut file = File::open(format!("resources/{}.bin", file)).unwrap(); // IO init
+        let mut buf = vec![];
+        file.read_to_end(&mut buf);
+        buf
+    }
+    fn build_name_map(file: &str) -> NameMapImpl {
+        let mut buf = Cursor::new(get_test_file(file));
+        NameMapImpl::new_from_buffer::<CV, FString32, NE>(&mut buf, 15) // read 15 names for T_Chair_M.uasset
+    }
+    fn write_to_file(file: &str, stream: &Vec<u8>) {
+        let mut writer = File::create(format!("resources/{}.bin", file)).unwrap();
+        writer.write_all(stream).unwrap();
+    }
 
     #[test]
     fn convert_single_name() {
-        // Converts a single PAK Package Name into an IO Store name, including rehashing
-        let mut cursor = Cursor::new(T_CHAIR_MAT_PAK_NAME); // get FString32 from stream
-        let str_in = FString32::from_buffer::<Cursor<[u8; 48]>, byteorder::LittleEndian>(&mut cursor).unwrap();
-        if str_in == None {
-            panic!("Should've received a non-empty string");
-        }
+        // Converts a single PAK Package Name into an IO Store name
+        // Includes text and hashes
+        let mut buf = Cursor::new(get_test_file("single_name_test_in")); // get FString32 from stream
+        let str_in = FString32::from_buffer::<CV, NE>(&mut buf).unwrap();
+        assert_ne!(str_in, None, "String is empty (0 characters in stream)");
         let str_in = str_in.unwrap();
         assert_eq!(str_in.len(), 39, "Length of string doesn't match expected length"); // this better not be 40...
         assert_eq!(&str_in, "/Game/StarterContent/Textures/T_Chair_M", "String of FString32 doesn't match");
-        let mut writer: Vec<u8> = vec![]; // Write to a "file" as an FString16
-        FString16::to_buffer::<Vec<u8>, byteorder::LittleEndian>(&str_in, &mut writer);
-        assert_eq!(writer[1], 39, "Length was not written to stream properly");
-        // TODO: Check text
-        assert_eq!(FString16::check_hash(&str_in), 0xA0081646CD9765E7, "Hash of FString16 doesn't match");
+        let mut writer: CV = Cursor::new(vec![]); // Write to a "file" as an FString16
+        FString16::to_buffer_text::<CV, NE>(&str_in, &mut writer); // export only the text portion, hashes are stored on a different block in IO store...
+        assert_eq!(get_test_file("single_name_test_cmp"), writer.into_inner(), "Exported byte streams don't match");
     }
     #[test]
     fn convert_name_map_texture() {
         // Converts a name map for a PAK package into an IO Store name map. FString16 names are written first, followed by hashes
-        // Name map block from T_Chair_M.uasset
-        let mut file = File::open("resources/name_map_test_in.bin").unwrap(); // IO init
-        let mut buf = vec![];
-        file.read_to_end(&mut buf);
-        let mut cursor = Cursor::new(buf); // read 15 names
-        //let name_map = NameMap::new_from_buffer::<Cursor<Vec<u8>>, FString32, byteorder::NativeEndian>(&mut cursor, 15);
-        let name_map = NameMap::new_from_buffer::<Cursor<Vec<u8>>, FString32, byteorder::NativeEndian>(&mut cursor, 15);
-        // FString16 names don't include a null terminator
-        assert_eq!(&name_map[0], "/Game/StarterContent/Textures/T_Chair_M", "Value in name map does not match the expected value");
-        assert_eq!(&name_map[2], "/Script/Engine", "Value in name map does not match the expected value");
-        assert_eq!(&name_map[4], "Default__Texture2D", "Value in name map does not match the expected value");
-        assert_eq!(&name_map[12], "StructProperty", "Value in name map does not match the expected value");
-        assert_eq!(&name_map[14], "Texture2D", "Value in name map does not match the expected value");
-        { // Write out to new file
-            let mut file = File::create("resources/name_map_test_out_texture.bin").unwrap();
-            let mut buf = Cursor::new(vec![]);
-            name_map.to_buffer_two_blocks::<Cursor<Vec<u8>>, FString16, byteorder::NativeEndian>(&mut buf);
-            file.write_all(&buf.into_inner());
-            // TODO: Write assertions for this (it works at the moment, at least)
-        }
-    
+        let mut reader = Cursor::new(get_test_file("name_map_test_in")); // Name map block from T_Chair_M.uasset
+        let name_map = NameMapImpl::new_from_buffer::<CV, FString32, NE>(&mut reader, 15);
+        let mut writer = Cursor::new(vec![]);
+        name_map.to_buffer_two_blocks::<CV, FString16, NE>(&mut writer);
+        assert_eq!(get_test_file("name_map_test_cmp"), writer.into_inner(), "Exported byte streams don't match");
     }
 
     #[test]
     fn convert_name_map_particle() {
-        // Converts a name map for a PAK package into an IO Store name map. FString16 names are written first, followed by hashes
-        // Name map block from T_Chair_M.uasset
-        let mut file = File::open("resources/name_map_particle_test.bin").unwrap(); // IO init
-        let mut buf = vec![];
-        file.read_to_end(&mut buf);
-        let mut cursor = Cursor::new(buf); // read 15 names
-        //let name_map = NameMap::new_from_buffer::<Cursor<Vec<u8>>, FString32, byteorder::NativeEndian>(&mut cursor, 15);
-        let name_map = NameMap::new_from_buffer::<Cursor<Vec<u8>>, FString32, byteorder::NativeEndian>(&mut cursor, 219);
-        // FString16 names don't include a null terminator
-        assert_eq!(&name_map[0], "/Game/StarterContent/Particles/Materials/M_Burst", "Value in name map does not match the expected value");
-        assert_eq!(&name_map[10], "ArrayProperty", "Value in name map does not match the expected value");
-        assert_eq!(&name_map[50], "Default__ParticleModuleColorOverLife", "Value in name map does not match the expected value");
-        assert_eq!(&name_map[100], "InterpMode", "Value in name map does not match the expected value");
-        assert_eq!(&name_map[218], "VelocityScale", "Value in name map does not match the expected value");
-        { // Write out to new file
-            let mut file = File::create("resources/name_map_test_out_particle.bin").unwrap();
-            let mut buf = Cursor::new(vec![]);
-            name_map.to_buffer_two_blocks::<Cursor<Vec<u8>>, FString16, byteorder::NativeEndian>(&mut buf);
-            file.write_all(&buf.into_inner());
-            // TODO: Write assertions for this (it works at the moment, at least)
-        }
+        // Name map from P_Explosion.uasset
+        let mut reader = Cursor::new(get_test_file("name_map_particle_in"));
+        let name_map = NameMapImpl::new_from_buffer::<CV, FString32, NE>(&mut reader, 219);
+        let mut writer = Cursor::new(vec![]);
+        name_map.to_buffer_two_blocks::<CV, FString16, NE>(&mut writer);
+        assert_eq!(get_test_file("name_map_particle_cmp"), writer.into_inner(), "Exported byte streams don't match");
     }
     
     #[test]
     fn convert_imports() {
-        type NE = byteorder::NativeEndian;
         // Converts the import block of a PAK Package to an IO Store import block.
         // Requires building a name map first (get that from T_Chair_M.uasset) 
-        let name_map = {
-            let mut file = File::open("resources/name_map_test_in.bin").unwrap(); // name map block
-            let mut buf = vec![];
-            file.read_to_end(&mut buf);
-            let mut buf = Cursor::new(buf);
-            NameMap::new_from_buffer::<Cursor<Vec<u8>>, FString32, byteorder::NativeEndian>(&mut buf, 15) // read 15 names for T_Chair_M.uasset
-        };
-        let mut file = File::open("resources/import_map_test_in.bin").unwrap();
-        let mut buf = vec![]; // Load in our imports (T_Chair_M has 3 imports)
-        file.read_to_end(&mut buf);
-        let mut cursor = Cursor::new(buf);
-        let f_import_map = FObjectImport::build_import_map::<Cursor<Vec<u8>>, byteorder::LittleEndian>(&mut cursor, 3);
-        let import_map = FObjectImport::resolve_imports(&f_import_map, &name_map); // get string values for package ids
-        let mut io_import_map: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        let name_map = build_name_map("name_map_test_in");
+        let mut reader = Cursor::new(get_test_file("import_map_test_in")); // Load in our imports (T_Chair_M has 3 imports)
+        let import_map = FObjectImport::build_import_map::<Cursor<Vec<u8>>, byteorder::LittleEndian>(&mut reader, 3);
+        let import_map = FObjectImport::resolve_imports(&import_map, &name_map); // get string values for package ids
+        let mut writer: CV = Cursor::new(vec![]);
         for i in import_map { // convert to IO Package imports (hash file name)
-            let mut to_hash = String::new();
-            if let Some(package_name) = &i.outer {
-                to_hash.push_str(package_name);
-                to_hash.push_str("/");
-            }
-            to_hash.push_str(&i.object_name);
-            to_hash.replace(".", "/"); // regex: find [.:]
-            to_hash.replace(":", "/");
-            i.to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&mut io_import_map);
+            i.to_buffer::<CV, NE>(&mut writer);
         }
-        // Now check that we made the right hashes
-        io_import_map.set_position(0); // go to beginning of string to read these values:
-        let import0 = FPackageObjectIndex::new(io_import_map.read_u64::<NE>().unwrap());
-        let import1 = FPackageObjectIndex::new(io_import_map.read_u64::<NE>().unwrap());
-        let import2 = FPackageObjectIndex::new(io_import_map.read_u64::<NE>().unwrap());
-        println!("{}", import0);
-        println!("{}", import1);
-        println!("{}", import2);
-        assert_eq!(import0.get_value(), 0x1b93bca796d1fa6f, "Import Hash does not match");
-        assert_eq!(import1.get_value(), 0x11acced3dc7c0922, "Import Hash does not match");
-        assert_eq!(import2.get_value(), 0x2bfad34ac8b1f6d0, "Import Hash does not match");
+        assert_eq!(get_test_file("import_map_test_cmp"), writer.into_inner(), "Exported byte streams don't match");
     }
-    
     #[test]
     #[allow(unused_variables)]
     // TODO
@@ -189,25 +133,15 @@ mod tests {
         let game_name = GameNameImpl::new("TestingSrc", "Game");
         let file_name = String::from(format!("/{}/Content/StarterContent/Textures/T_Chair_M", game_name.get_project_name()));
         // this + object_name = global_import_name value *as long as super_index is null*
-        let name_map = {
-            let mut file = File::open("resources/name_map_test_in.bin").unwrap(); // name map block
-            let mut buf = vec![];
-            file.read_to_end(&mut buf);
-            let mut buf = Cursor::new(buf);
-            NameMap::new_from_buffer::<Cursor<Vec<u8>>, FString32, byteorder::NativeEndian>(&mut buf, 15) // read 15 names for T_Chair_M.uasset
-        };
-        let mut file = File::open("resources/export_map_test_in.bin").unwrap();
-        let mut buf = vec![]; // Load in our export (Just one export...)
-        // A later test will convert the export map for a particle system that has 68 exports
-        file.read_to_end(&mut buf);
-        let mut cursor_read = Cursor::new(buf);
-        let export_data = FObjectExport::from_buffer::<Cursor<Vec<u8>>, byteorder::LittleEndian>(&mut cursor_read).unwrap();
-        // FExportMapEntry params
-        //let export_data = export_data.resolve(&name_map,&file_name, &game_name);
+        let name_map = build_name_map("name_map_test_in");
+        let mut reader = Cursor::new(get_test_file("export_map_test_in")); // Load in our export (Just one export...)
+        let export_data = FObjectExport::from_buffer::<CV, NE>(&mut reader).unwrap(); // Get FExportMapEntry params
         let export_data = ObjectExport2::resolve(&export_data, &name_map, &file_name, &game_name);
-        // export it
-        let mut cursor_write: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        export_data.to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&mut cursor_write, &name_map);
+        let mut writer: CV = Cursor::new(vec![]); // export it
+        export_data.to_buffer::<CV, NameMapImpl, NE>(&mut writer, &name_map);
+        let buf_out = writer.into_inner();
+        write_to_file("export_map_test_out", &buf_out);
+        assert_eq!(get_test_file("export_map_test_cmp"), buf_out, "Exported byte streams don't match");
     }
     /* 
 

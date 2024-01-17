@@ -10,10 +10,11 @@ use crate::{
     partition::GameName,
     string::{
         FStringDeserializer, FStringSerializer, FStringSerializerHash, 
-        FStringSerializerText, FStringSerializerBlockAlign
+        FStringSerializerText, FStringSerializerBlockAlign, FMappedName
     }
 };
 use std::{
+    collections::BTreeMap,
     error::Error,
     io::{Cursor, Seek, SeekFrom, Read, Write},
     option::Option,
@@ -116,14 +117,40 @@ impl PackageFileSummary for PackageFileSummaryType5 {
 
 }
 
-// Global name map per packaged asset. May make this an actual map later depending on how it gets used
-pub struct NameMap(Vec<String>);
-impl NameMap {
-    pub fn new() -> Self {
-        NameMap(vec![])
-    }
+
+// Global name map per packaged asset.
+pub trait NameMap {
     // Adding onto an already existing name map
-    pub fn add_from_buffer<
+    fn add_from_buffer<
+        R: Read + Seek,
+        T: FStringDeserializer,
+        E: byteorder::ByteOrder
+    >(&mut self, reader: &mut R, count: usize);
+    // Write a contiguous block of names with text info only into a buffer.
+    fn to_buffer_text_only<
+        W: Write + Seek,
+        T: FStringSerializer + FStringSerializerText,
+        E: byteorder::ByteOrder
+    >(&self, writer: &mut W) -> std::io::Result<()>;
+    // Write a contiguous block of names, bundling together text and info into a buffer. This is used in PAK packages
+    fn to_buffer_single_block<
+        W: Write + Seek,
+        T: FStringSerializer + FStringSerializerText + FStringSerializerHash,
+        E: byteorder::ByteOrder
+    >(&self, writer: &mut W) -> std::io::Result<()>;
+    // Write a block of names, followed by a block of hashes. This is done in IO Store packages
+    fn to_buffer_two_blocks<
+        W: Write + Seek,
+        T: FStringSerializer + FStringSerializerText + FStringSerializerHash + FStringSerializerBlockAlign,
+        E: byteorder::ByteOrder
+    >(&self, writer: &mut W) -> std::io::Result<()>;
+    fn get_string_from_index(&self, index: usize) -> Result<&str, String>;
+    fn get_string_from_package_index(&self, index: i32) -> Option<&str>;
+}
+pub struct NameMapImpl(Vec<String>);
+impl NameMap for NameMapImpl {
+    // Adding onto an already existing name map
+    fn add_from_buffer<
         R: Read + Seek,
         T: FStringDeserializer,
         E: byteorder::ByteOrder
@@ -134,18 +161,8 @@ impl NameMap {
             }
         }
     }
-    // Creating a new name map for a new package. This is most likely to be used with asset package strings
-    pub fn new_from_buffer<
-        R: Read + Seek,
-        T: FStringDeserializer,
-        E: byteorder::ByteOrder
-    >(reader: &mut R, count: usize) -> Self {
-        let mut map = NameMap::new();
-        map.add_from_buffer::<R, T, E>(reader, count);
-        map
-    }
-    pub fn to_buffer_text_only<
-        W: Write,
+    fn to_buffer_text_only<
+        W: Write + Seek,
         T: FStringSerializer + FStringSerializerText,
         E: byteorder::ByteOrder
     >(&self, writer: &mut W) -> std::io::Result<()> {
@@ -154,8 +171,8 @@ impl NameMap {
         }
         Ok(())
     }
-    pub fn to_buffer_single_block<
-        W: Write,
+    fn to_buffer_single_block<
+        W: Write + Seek,
         T: FStringSerializer + FStringSerializerText + FStringSerializerHash,
         E: byteorder::ByteOrder
     >(&self, writer: &mut W) -> std::io::Result<()> {
@@ -165,7 +182,7 @@ impl NameMap {
         }
         Ok(())
     }
-    pub fn to_buffer_two_blocks<
+    fn to_buffer_two_blocks<
         W: Write + Seek,
         T: FStringSerializer + FStringSerializerText + FStringSerializerHash + FStringSerializerBlockAlign,
         E: byteorder::ByteOrder
@@ -179,7 +196,7 @@ impl NameMap {
         }
         Ok(())
     }
-    pub fn get_string_from_index(&self, index: usize) -> Result<&str, String> {
+    fn get_string_from_index(&self, index: usize) -> Result<&str, String> {
         let a = self.0.get(index);
         match self.0.get(index) {
             Some(s) => Ok(s),
@@ -191,7 +208,7 @@ impl NameMap {
             )
         }
     }
-    pub fn get_string_from_package_index(&self, index: i32) -> Option<&str> {
+    fn get_string_from_package_index(&self, index: i32) -> Option<&str> {
         // values above 0 are exports, below zero are imports
         Some(self.get_string_from_index({ 
             match index {
@@ -202,19 +219,36 @@ impl NameMap {
         }).unwrap())
     }
 }
-impl Index<usize> for NameMap {
+impl Index<usize> for NameMapImpl {
     type Output = String;
     fn index(&self, index: usize) -> &Self::Output {
         self.0.index(index)
     }
 }
+
+impl NameMapImpl {
+    pub fn new() -> Self {
+        Self(vec![])
+    }
+    // Creating a new name map for a new package. This is most likely to be used with asset package strings
+    pub fn new_from_buffer<
+        R: Read + Seek,
+        T: FStringDeserializer,
+        E: byteorder::ByteOrder
+    >(reader: &mut R, count: usize) -> Self {
+        let mut map = NameMapImpl::new();
+        map.add_from_buffer::<R, T, E>(reader, count);
+        map
+    }
+}
+
 #[derive(Debug)]
 #[repr(C)]
 pub struct FObjectImport {
     pub class_package: u64,
     pub class_name: u64,
     pub outer_index: i32,
-    pub object_name: u64
+    pub object_name: FMappedName
 }
 
 impl FObjectImport {
@@ -222,18 +256,19 @@ impl FObjectImport {
         let class_package = reader.read_u64::<E>()?;
         let class_name = reader.read_u64::<E>()?;
         let outer_index = reader.read_i32::<E>()?;
-        let object_name = reader.read_u64::<E>()?;
+        let object_name = reader.read_u64::<E>()?.into();
         Ok(FObjectImport { class_package, class_name, outer_index, object_name })
     }
-    pub fn resolve<'a>(&'a self, names: &'a NameMap) -> ObjectImport {
+    pub fn resolve<'a, N: NameMap>(&'a self, names: &'a N) -> ObjectImport {
         let class_package = names.get_string_from_index(self.class_package as usize).unwrap();
         let class_name = names.get_string_from_index(self.class_name as usize).unwrap();
         let outer = names.get_string_from_package_index(self.outer_index);
-        let object_name = names.get_string_from_index(self.object_name as usize).unwrap();
+        println!("{:?}", outer);
+        let object_name = names.get_string_from_index(self.object_name.get_name_index() as usize).unwrap();
         ObjectImport {class_package, class_name, outer, object_name }
     }
     // Convert FObjectImport into named ObjectImport
-    pub fn resolve_imports<'a>(import_map: &'a Vec<FObjectImport>, name_map: &'a NameMap) -> Vec<ObjectImport<'a>> {
+    pub fn resolve_imports<'a, N: NameMap>(import_map: &'a Vec<FObjectImport>, name_map: &'a N) -> Vec<ObjectImport<'a>> {
         let mut resolves = vec![];
         for i in import_map {
             resolves.push(i.resolve(name_map));
@@ -248,18 +283,6 @@ impl FObjectImport {
         import_map
     }
 }
-/*  ObjectImport with owned values (not using these.....)
-#[allow(dead_code)]
-pub struct ObjectImport {
-    pub class_package: String,
-    pub class_name: String,
-    pub outer: Option<String>,
-    pub object_name: String
-}
-*/
-// ObjectImport with borrowed strings - their scope will be shorter than NameMap 
-// (that's read second, after header, while this is read third) - additionally no string modification is done
-// ObjectImport with borrowed strings is in io_package
 
 pub struct IntBool(i32);
 
@@ -279,14 +302,14 @@ impl IntBool {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct FObjectExport {
     pub class_index: i32,
     pub super_index: i32,
     pub template_index: i32,
     pub outer_index: i32,
-    pub object_name: i64,
+    pub object_name: FMappedName,
     pub object_flags: u32,
     pub serial_size: i64, // this is i32 in older versions before 4.25
     pub serial_offset: i64,
@@ -305,11 +328,11 @@ pub struct FObjectExport {
 
 impl FObjectExport {
     pub fn from_buffer<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R) -> Result<FObjectExport, Box<dyn Error>> {
-        let class_index = reader.read_i32::<E>()?;
-        let super_index = reader.read_i32::<E>()?;
-        let template_index = reader.read_i32::<E>()?;
+        let class_index = reader.read_i32::<E>()? - 1; // subtract 1 for exports, but not for imports?
+        let super_index = reader.read_i32::<E>()? - 1;
+        let template_index = reader.read_i32::<E>()? - 1;
         let outer_index = reader.read_i32::<E>()?;
-        let object_name = reader.read_i64::<E>()?;
+        let object_name = reader.read_u64::<E>()?.into();
         let object_flags = reader.read_u32::<E>()?;
         let serial_size = reader.read_i64::<E>()?;
         let serial_offset = reader.read_i64::<E>()?;
