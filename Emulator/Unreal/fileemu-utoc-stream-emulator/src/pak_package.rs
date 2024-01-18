@@ -6,7 +6,7 @@ pub type GUID = u128;
 use bitflags::bitflags;
 use byteorder::ReadBytesExt;
 use crate::{
-    io_package::{ObjectImport, ObjectExport2},
+    io_package::{IoStoreObjectIndex, ObjectExport2},
     partition::GameName,
     string::{
         FStringDeserializer, FStringSerializer, FStringSerializerHash, 
@@ -145,7 +145,7 @@ pub trait NameMap {
         E: byteorder::ByteOrder
     >(&self, writer: &mut W) -> std::io::Result<()>;
     fn get_string_from_index(&self, index: usize) -> Result<&str, String>;
-    fn get_string_from_package_index(&self, index: i32) -> Option<&str>;
+    //fn get_string_from_package_index(&self, index: i32) -> Option<&str>; DEPRECATED
 }
 pub struct NameMapImpl(Vec<String>);
 impl NameMap for NameMapImpl {
@@ -208,16 +208,6 @@ impl NameMap for NameMapImpl {
             )
         }
     }
-    fn get_string_from_package_index(&self, index: i32) -> Option<&str> {
-        // values above 0 are exports, below zero are imports
-        Some(self.get_string_from_index({ 
-            match index {
-                index if index > 0 => (index - 1) as usize,
-                index if index < 0 => -index as usize,
-                _ => return None
-            }
-        }).unwrap())
-    }
 }
 impl Index<usize> for NameMapImpl {
     type Output = String;
@@ -225,7 +215,6 @@ impl Index<usize> for NameMapImpl {
         self.0.index(index)
     }
 }
-
 impl NameMapImpl {
     pub fn new() -> Self {
         Self(vec![])
@@ -239,6 +228,38 @@ impl NameMapImpl {
         let mut map = NameMapImpl::new();
         map.add_from_buffer::<R, T, E>(reader, count);
         map
+    }
+}
+
+pub enum PakObjectIndex {
+    Import(i32),
+    Export(i32),
+    None
+}
+impl PakObjectIndex {
+    fn get_package_index(index: i32) -> Self {
+        match index {
+            i if index < 0 => Self::Import(-i - 1),
+            i if index > 0 => Self::Export(i - 1),
+            _ => Self::None
+        }
+    }
+}
+
+pub struct IntBool(i32);
+impl IntBool {
+    pub fn new(val: i32) -> Self {
+        match val {
+            0 | 1 => Self(val),
+            _ => panic!("ERROR: Tried to initialize an IntBool with a value other than 0 or 1")
+        }
+    }
+    pub fn value(&self) -> bool {
+        match self.0 {
+            0 => false,
+            1 => true,
+            _ => panic!("ERROR: IntBool has value other than 0 or 1")
+        }
     }
 }
 
@@ -259,46 +280,47 @@ impl FObjectImport {
         let object_name = reader.read_u64::<E>()?.into();
         Ok(FObjectImport { class_package, class_name, outer_index, object_name })
     }
-    pub fn resolve<'a, N: NameMap>(&'a self, names: &'a N) -> ObjectImport {
-        let class_package = names.get_string_from_index(self.class_package as usize).unwrap();
-        let class_name = names.get_string_from_index(self.class_name as usize).unwrap();
-        let outer = names.get_string_from_package_index(self.outer_index);
-        println!("{:?}", outer);
-        let object_name = names.get_string_from_index(self.object_name.get_name_index() as usize).unwrap();
-        ObjectImport {class_package, class_name, outer, object_name }
-    }
-    // Convert FObjectImport into named ObjectImport
-    pub fn resolve_imports<'a, N: NameMap>(import_map: &'a Vec<FObjectImport>, name_map: &'a N) -> Vec<ObjectImport<'a>> {
-        let mut resolves = vec![];
-        for i in import_map {
-            resolves.push(i.resolve(name_map));
-        }
-        resolves
-    }
-    pub fn build_import_map<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R, count: usize) -> Vec<FObjectImport> {
-        let mut import_map = vec![];
-        for _ in 0..count {
-            import_map.push(FObjectImport::from_buffer::<R, E>(reader).unwrap());
-        }
-        import_map
-    }
-}
-
-pub struct IntBool(i32);
-
-impl IntBool {
-    pub fn new(val: i32) -> Self {
-        match val {
-            0 | 1 => Self(val),
-            _ => panic!("ERROR: Tried to initialize an IntBool with a value other than 0 or 1")
+    pub fn resolve<'a, N: NameMap>(&'a self, names: &'a N, imports: &Vec<FObjectImport>) -> Result<IoStoreObjectIndex, String> {
+        // Check if the target import item is a leaf on the import tree
+        match PakObjectIndex::get_package_index(self.outer_index) {
+            PakObjectIndex::Import(i) => {
+                // import could be a ScriptImport (/script/...) or a PackageImport (/game/...)
+                let mut out = String::from(names.get_string_from_index(imports[i as usize].object_name.get_name_index() as usize).unwrap()) + "/";
+                out.push_str(names.get_string_from_index(self.object_name.get_name_index() as usize).unwrap());
+                // check beginning of path to determine import type
+                Ok(FObjectImport::begins_with_script_else(out, |n| IoStoreObjectIndex::PackageImport(n)))
+            },
+            PakObjectIndex::Export(i) => Ok(IoStoreObjectIndex::Export(i as u64)),
+            PakObjectIndex::None => {
+                // It's the root import node, though it could be a root script
+                let name_copy = String::from(names.get_string_from_index(self.object_name.get_name_index() as usize).unwrap());
+                Ok(FObjectImport::begins_with_script_else(name_copy, |_| IoStoreObjectIndex::Empty))
+            },
         }
     }
-    pub fn value(&self) -> bool {
-        match self.0 {
-            0 => false,
-            1 => true,
-            _ => panic!("ERROR: IntBool has value other than 0 or 1")
+    fn begins_with_script_else<F>(tstr: String, not_script: F) -> IoStoreObjectIndex
+    where F: Fn(String) -> IoStoreObjectIndex
+    {
+        let check_index = tstr.rfind("/Script/");
+        if let Some(n) = check_index {
+            if n == 0 {
+                return IoStoreObjectIndex::ScriptImport(tstr)
+            }
         }
+        not_script(tstr)
+    }
+    // Deserializes a byte stream containing a contigous array of elements into a list of it's respective type
+    pub fn build_map<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R, count: usize) -> Vec<FObjectImport> {
+        let mut map = vec![];
+        for i in 0..count {
+            match FObjectImport::from_buffer::<R, E>(reader) {
+                Ok(obj) => map.push(obj),
+                Err(e) => {
+                    panic!("Error deserializing import object on ID {}: {}", i, e.to_string())
+                }
+            }
+        }
+        map
     }
 }
 
@@ -328,9 +350,9 @@ pub struct FObjectExport {
 
 impl FObjectExport {
     pub fn from_buffer<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R) -> Result<FObjectExport, Box<dyn Error>> {
-        let class_index = reader.read_i32::<E>()? - 1; // subtract 1 for exports, but not for imports?
-        let super_index = reader.read_i32::<E>()? - 1;
-        let template_index = reader.read_i32::<E>()? - 1;
+        let class_index = reader.read_i32::<E>()?;
+        let super_index = reader.read_i32::<E>()?;
+        let template_index = reader.read_i32::<E>()?;
         let outer_index = reader.read_i32::<E>()?;
         let object_name = reader.read_u64::<E>()?.into();
         let object_flags = reader.read_u32::<E>()?;
@@ -372,6 +394,89 @@ impl FObjectExport {
             create_before_create_dependencies
         })
     }
+
+    pub fn build_map<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R, count: usize) -> Vec<FObjectExport> {
+        let mut map = vec![];
+        for _ in 0..count {
+            map.push(FObjectExport::from_buffer::<R, E>(reader).unwrap());
+        }
+        map
+    }
+    // Own all our values for now i'm too busy trying to make this work to optimize lol
+    fn get_outer_object_index(&self) -> IoStoreObjectIndex {
+        match PakObjectIndex::get_package_index(self.outer_index) {
+            PakObjectIndex::Import(n) => panic!("Import index is invalid for export outer"),
+            PakObjectIndex::Export(n) => IoStoreObjectIndex::Export(n as u64),
+            PakObjectIndex::None => IoStoreObjectIndex::Empty,
+        }
+    }
+    fn get_class_object_index(&self, imports: &Vec<IoStoreObjectIndex>) -> IoStoreObjectIndex {
+        match PakObjectIndex::get_package_index(self.class_index) {
+            PakObjectIndex::Import(n) => (&imports[n as usize]).clone(),
+            PakObjectIndex::Export(n) => panic!("Export index is invalid for export class"),
+            PakObjectIndex::None => panic!("None is invalid for export class"),
+        }
+    }
+    fn get_super_object_index(&self) -> IoStoreObjectIndex {
+        match PakObjectIndex::get_package_index(self.super_index) {
+            PakObjectIndex::Import(n) => panic!("Import index is invalid for export super"),
+            PakObjectIndex::Export(n) => panic!("Export index is invalid for export super"),
+            PakObjectIndex::None => IoStoreObjectIndex::Empty,
+        }
+    }
+    fn get_template_object_index(&self, imports: &Vec<IoStoreObjectIndex>) -> IoStoreObjectIndex {
+        match PakObjectIndex::get_package_index(self.template_index) {
+            PakObjectIndex::Import(n) => (&imports[n as usize]).clone(),
+            PakObjectIndex::Export(n) => panic!("Export index is invalid for export template"),
+            PakObjectIndex::None => panic!("None is invalid for export template"),
+        }
+    }
+    fn get_global_import_name_object_index<N: NameMap, G: GameName>(&self, imports: &Vec<IoStoreObjectIndex>, names: &N, file_name: &str, game_name: &G) -> IoStoreObjectIndex {
+        match PakObjectIndex::get_package_index(self.outer_index) {
+            PakObjectIndex::Import(n) => panic!("Import index is invalid for export global import"),
+            PakObjectIndex::Export(n) => IoStoreObjectIndex::Empty,
+            PakObjectIndex::None => {
+                let asset_proj_path = String::from(file_name) + "/" + names.get_string_from_index(self.object_name.get_name_index() as usize).unwrap();
+                let global_import_name = game_name.project_path_to_game_path(&asset_proj_path).unwrap();
+                IoStoreObjectIndex::PackageImport(global_import_name)
+            }
+        }
+    }
+    // Resolving requires that we have an import map loaded
+    // outer_index is always of either type Export if it's not the root export or Null if it is
+    // class_index is always of type ScriptImport
+    // super_index is always of type Null
+    // template_index is always of type ScriptImport
+    // global_import_index is always of type Null if it's not the root export, or PackageImport if it is
+
+    pub fn resolve<
+        N: NameMap,
+        G: GameName
+    >(&self, names: &N, imports: &Vec<IoStoreObjectIndex>, exports: &Vec<FObjectExport>, file_name: &str, game_name: &G) -> ObjectExport2 {
+        let cooked_serial_offset = self.serial_offset - 4; // PAK package serial offset - magic bytes
+        let cooked_serial_size = self.serial_size;
+
+        let object_name = self.object_name; // this can just be passed straight through, but we'll still need to get that string for global_import_name
+        let outer_index = self.get_outer_object_index();
+        let class_name = self.get_class_object_index(&imports);
+        let super_name = self.get_super_object_index();
+        let template_name = self.get_template_object_index(&imports);
+        let global_import_name = self.get_global_import_name_object_index(&imports, names, file_name, game_name);
+        let object_flags = self.object_flags;
+        let filter_flags = 0; // EExportFilterFlags::None
+        ObjectExport2 {
+            cooked_serial_offset,
+            cooked_serial_size,
+            object_name,
+            outer_index,
+            class_name,
+            super_name,
+            template_name,
+            global_import_name,
+            object_flags,
+            filter_flags
+        }
+    }
 }
 pub struct FExportBundleEntry {
 
@@ -387,10 +492,10 @@ impl FGraphPackage {
 }
 
 // Object Export:
-// ClassIndex: FPackageIndex
-// SuperIndex: FPackageIndex
-// TemplateIndex: FPackageIndex
-// OuterIndex: FPackageIndex
+// ClassIndex: PakObjectIndex
+// SuperIndex: PakObjectIndex
+// TemplateIndex: PakObjectIndex
+// OuterIndex: PakObjectIndex
 // ObjectName: FName
 // ObjectFlags: flags
 // SerialSize: .uexp size - magic bytes at end
@@ -402,10 +507,10 @@ impl FGraphPackage {
 // CookedSerialOffset - .uasset size - magic bytes at start
 // CookedSerialSize - .uexp size - magic bytes at end
 // ObjectName - FMappedName
-// OuterName - FPackageObjectIndex
-// ClassName - FPackageObjectIndex
-// SuperIndex - FPackageObjectIndex
-// TemplateIndex - FPackageObjectIndex
-// GlobalImportIndex - FPackageObjectIndex
+// OuterName - IoStoreObjectIndex
+// ClassName - IoStoreObjectIndex
+// SuperIndex - IoStoreObjectIndex
+// TemplateIndex - IoStoreObjectIndex
+// GlobalImportIndex - IoStoreObjectIndex
 // ObjectFlags - flags
 // FilterFlags - ??

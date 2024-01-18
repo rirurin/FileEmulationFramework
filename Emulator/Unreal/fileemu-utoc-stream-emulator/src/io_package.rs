@@ -14,7 +14,7 @@ type ExportFilterFlags = u8; // and this one too...
 
 use byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
 use crate::{
-    pak_package::{FObjectExport, NameMap},
+    pak_package::{FObjectImport, FObjectExport, NameMap},
     partition::GameName,
     string::FMappedName
 };
@@ -23,43 +23,29 @@ use std::{
     fmt,
     io::{Cursor, Seek, SeekFrom, Write}
 };
-
-#[derive(Debug)]
-#[repr(u8)]
-pub enum FPackageObjectIndexType {
-    Export = 0,
-    ScriptImport,
-    PackageImport,
-    Null
+// IoStoreObjectIndex is a 64 bit value consisting of a hash of a target string for the lower 62 bits and an object type for the highest 2
+// expect for Empty which represents a null value and Export which contains an index to another item on the export tree
+// This struct is used to fully represent an import on an IO Store package, and is the basic structure for several named fields in export
+#[derive(Debug, Clone, PartialEq)]
+pub enum IoStoreObjectIndex {
+    Export(u64),            // type 0 (index, Export -> Export)
+    ScriptImport(String),   // type 1 (string hash, represents Import mounted at /Script/...)
+    PackageImport(String),  // type 2 (string hash, represents Import mounted at /Game/...)
+    Empty                   // type 3 (-1)
 }
 
-impl TryFrom<u8> for FPackageObjectIndexType {
-    type Error = &'static str;
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(FPackageObjectIndexType::Export),
-            1 => Ok(FPackageObjectIndexType::ScriptImport),
-            2 => Ok(FPackageObjectIndexType::PackageImport),
-            3 => Ok(FPackageObjectIndexType::Null),
-            _ => Err("Unimplemented FPackageObjectIndex Type")
+impl IoStoreObjectIndex {
+    pub fn to_buffer<W: Write, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        match self {
+            Self::Export(i) => writer.write_u64::<E>(*i as u64)?,
+            Self::ScriptImport(v) => writer.write_u64::<E>(IoStoreObjectIndex::generate_hash(v, 1))?,
+            Self::PackageImport(v) => writer.write_u64::<E>(IoStoreObjectIndex::generate_hash(v, 2))?,
+            Self::Empty => writer.write_u64::<E>(u64::MAX)?,
         }
+        Ok(())
     }
-}
-#[derive(Debug, PartialEq, Eq)]
-pub struct FPackageObjectIndex(u64);
 
-impl FPackageObjectIndex {
-    pub fn new(val: u64) -> Self {
-        Self(val)
-    }
-    pub fn try_generate_hash<S: AsRef<str>>(import: &Option<S>, obj_type: FPackageObjectIndexType) -> FPackageObjectIndex {
-        match import {
-            Some(to_hash) => FPackageObjectIndex::generate_hash(to_hash.as_ref(), obj_type),
-            None => FPackageObjectIndex(u64::MAX)
-        }
-    }
-    // TODO: Allow for package conversion for platforms that use 1 byte chars (most seem to use 2 byte chars though)
-    pub fn generate_hash(import: &str, obj_type: FPackageObjectIndexType) -> Self {
+    fn generate_hash(import: &str, obj_type: u64) -> u64 {
         println!("make hash for {}", import);
         let to_hash = String::from(import).to_lowercase();
         // hash chars are sized according to if the platform supports wide characters, which is usually the case
@@ -69,32 +55,30 @@ impl FPackageObjectIndex {
         // verified: the strings are identical (no null terminator) when using FString16
         let mut hash: u64 = cityhasher::hash(to_hash); // cityhash it
         hash &= !(3 << 62); // first 62 bits are our hash
-        hash |= (obj_type as u64) << 62; // stick the type in high 2 bits
-        Self(hash)
-    }
-    pub fn get_value(&self) -> u64 {
-        self.0 & !(3 << 62)
-    }
-    pub fn get_type(&self) -> FPackageObjectIndexType {
-        FPackageObjectIndexType::try_from((self.0 >> 62 & 3) as u8).unwrap()
+        hash |= obj_type << 62; // stick the type in high 2 bits
+        hash
     }
 }
 
-impl fmt::Display for FPackageObjectIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "value 0x{:X}, type {:?}", self.get_value(), self.get_type())
+pub struct ObjectImport;
+impl ObjectImport {
+    // Convert FObjectImport into named ObjectImport
+    pub fn from_pak_asset<N: NameMap>(import_map: &Vec<FObjectImport>, name_map: &N) -> Vec<IoStoreObjectIndex> {
+        let mut resolves = vec![];
+        for (i, v) in import_map.into_iter().enumerate() {
+            match v.resolve(name_map, import_map) {
+                Ok(obj) => resolves.push(obj),
+                Err(e) => panic!("Error converting PAK formatted import to IO Store import on ID {} \nValue {:?}\nReason: {}", i, v, e.to_string())
+            }
+        }
+        resolves
     }
-}
 
-impl From<FPackageObjectIndex> for u64 {
-    fn from(idx: FPackageObjectIndex) -> u64 {
-        idx.0
-    }
-}
-
-impl AsRef<u64> for FPackageObjectIndex {
-    fn as_ref(&self) -> &u64 {
-        &self.0
+    pub fn map_to_buffer<W: Write, E: byteorder::ByteOrder>(map: &Vec<IoStoreObjectIndex>, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        for i in map {
+            i.to_buffer::<W, E>(writer)?;
+        }
+        Ok(())
     }
 }
 
@@ -143,7 +127,6 @@ impl FPackageSummary for FPackageSummary2 {
     // ...
 }
 */
-//use crate::types::FString32NoHash;
 
 pub const UASSET_MAGIC: u32 = 0x9E2A83C1;
 
@@ -156,9 +139,7 @@ impl fmt::Display for ConvertPAKAssetError {
     }
 }
 
-impl Error for ConvertPAKAssetError {
-
-}
+impl Error for ConvertPAKAssetError {}
 
 // GPackageFileUE4Version: (from ObjectVersion.h) - corresponds to EUnrealEngineObjectUE4Version
 // UE 4.25 - 518
@@ -280,34 +261,68 @@ pub struct ZenPackageSummaryType2 { // Unreal Engine 5.3
 */
 // Name Map: Vec of FString + u64 Hashes
 
-// Import Map: Vec of u64 Hashes
-
-pub struct ObjectImport<'a> {
-    pub class_package: &'a str,
-    pub class_name: &'a str,
-    pub outer: Option<&'a str>,
-    pub object_name: &'a str
+// Import Map: Vec of u64 Hashes (derived from the import file name)
+// TODO: Rename this to IoStoreObjectIndex
+/* 
+#[derive(Debug, PartialEq)]
+pub enum ObjectImport {
+    ScriptImport(String),
+    PackageImport(String),
+    Empty
 }
+/* 
+#[derive(Debug)]
+pub struct ObjectImport {
+    pub import_file: Option<String>
+}
+*/
 
-impl<'a> ObjectImport<'a> {
+impl ObjectImport {
     pub fn to_buffer<W: Write, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
-        // Write out a single FPackageObjectIndex hash to IO Store
+        // Write out a single IoStoreObjectIndex hash to IO Store
         // Value to hash is ([package_name]/)[path]
-        let mut to_hash = String::new();
-        if let Some(package_name) = self.outer {
-            to_hash.push_str(package_name);
-            to_hash.push_str("/");
-        }
-        to_hash.push_str(&self.object_name);
-        to_hash.replace(".", "/"); // regex: find [.:]
-        to_hash.replace(":", "/");
+        match self {
+            Self::ScriptImport(path)  => ObjectImport::write_hash::<W, E>(path, writer, IoStoreObjectIndexType::ScriptImport),
+            Self::PackageImport(path) => ObjectImport::write_hash::<W, E>(path, writer, IoStoreObjectIndexType::PackageImport),
+            Self::Empty => {
+                writer.write_u64::<E>(u64::MAX)?; // write_hash(path, writer, IoStoreObjectIndexType::Null)
+                Ok(())
+            },
+        };
+        Ok(())
+    }
+
+    fn write_hash<W: Write, E: byteorder::ByteOrder>(path: &str, writer: &mut W, obj_type: IoStoreObjectIndexType) -> Result<(), Box<dyn Error>> {
+        let mut to_hash = String::from(path);
+        to_hash = to_hash.replace(".", "/"); // regex: find [.:]
+        to_hash = to_hash.replace(":", "/");
         writer.write_u64::<E>(
-            FPackageObjectIndex::generate_hash(&to_hash, FPackageObjectIndexType::ScriptImport).into()
+            IoStoreObjectIndex::generate_hash(&to_hash, obj_type).into()
         )?;
         Ok(())
     }
-}
 
+    // Convert FObjectImport into named ObjectImport
+    pub fn from_pak_asset<N: NameMap>(import_map: &Vec<FObjectImport>, name_map: &N) -> Vec<ObjectImport> {
+        let mut resolves = vec![];
+        for (i, v) in import_map.into_iter().enumerate() {
+            println!("{}, {:?}", i, v);
+            match v.resolve(name_map, import_map) {
+                Ok(obj) => resolves.push(obj),
+                Err(e) => panic!("Error converting PAK formatted import to IO Store import on ID {} \nValue {:?}\nReason: {}", i, v, e.to_string())
+            }
+        }
+        resolves
+    }
+
+    pub fn map_to_buffer<W: Write, E: byteorder::ByteOrder>(map: &Vec<Self>, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        for i in map {
+            i.to_buffer::<W, E>(writer)?;
+        }
+        Ok(())
+    }
+}*/
+/*
 pub trait ObjectExportWriter {
     fn to_buffer<
         W: Write,
@@ -335,98 +350,68 @@ pub struct ObjectExport1<'a> { // Unreal Engine 4.25
     pub filter_flags: ExportFilterFlags
 }
 
-/*
+
 impl<'a> ObjectExportWriter for ObjectExport1<'a> {
     
 }
-*/
 
 #[derive(Debug)]
 pub struct MappedName<'a> {
     pub name: &'a str,
     pub value: FMappedName
 }
+*/
 
 #[derive(Debug)]
-#[allow(dead_code)]
-pub struct ObjectExport2<'a> { // Unreal Engine 4.25+, 4.26-4.27 
+pub struct ObjectExport2 { // Unreal Engine 4.25+, 4.26-4.27 
     pub cooked_serial_offset: i64,
     pub cooked_serial_size: i64,
-    //pub object_name: &'a str,
-    pub object_name: MappedName<'a>,
-    pub outer_export: i32, // refers to ith entry in export map
-    //pub class_name: Option<&'a str>,
-    pub class_name: Option<String>, // PAK str(class_index) + str(object_name)
-    pub super_name: Option<&'a str>,
-    pub template_name: Option<&'a str>, // PAK str(class_index) + str(template_name)
-    pub global_import_name: Option<String>, // global import index is is usually either null if it's not the root object (outer is null)
-    // otherwise it's PackageImport (this value is correct)
+    pub object_name: FMappedName,
+    pub outer_index: IoStoreObjectIndex, // TODO: use refs preferably
+    pub class_name: IoStoreObjectIndex,
+    pub super_name: IoStoreObjectIndex,
+    pub template_name: IoStoreObjectIndex,
+    pub global_import_name: IoStoreObjectIndex,
     pub object_flags: ObjectFlags,
     pub filter_flags: ExportFilterFlags
 }
 
-impl<'a> ObjectExportWriter for ObjectExport2<'a> {
-    fn to_buffer<
-        W: Write,
+impl ObjectExport2 {
+    pub fn from_pak_asset<
         N: NameMap,
-        E: byteorder::ByteOrder
-    >(&self, writer: &mut W, names: &N) -> Result<(), Box<dyn Error>> {
-        writer.write_i64::<E>(self.cooked_serial_offset)?;
-        writer.write_i64::<E>(self.cooked_serial_size)?;
-        writer.write_u64::<E>(self.object_name.value.into()); // FMappedName SourceName
-        writer.write_u64::<E>(FPackageObjectIndex::try_generate_hash::<&str>(&None, FPackageObjectIndexType::ScriptImport).into())?; // OUTER INDEX
-        writer.write_u64::<E>(FPackageObjectIndex::try_generate_hash(&self.class_name, FPackageObjectIndexType::ScriptImport).into())?;
-        writer.write_u64::<E>(FPackageObjectIndex::try_generate_hash(&self.super_name, FPackageObjectIndexType::ScriptImport).into())?;
-        writer.write_u64::<E>(FPackageObjectIndex::try_generate_hash(&self.template_name, FPackageObjectIndexType::ScriptImport).into())?;
-        writer.write_u64::<E>(FPackageObjectIndex::try_generate_hash(&self.global_import_name, FPackageObjectIndexType::PackageImport).into())?;
-        writer.write_u32::<E>(self.object_flags);
-        writer.write_u32::<E>(0); // u8 filterflags + u24 padding (aligns this to nearest 0x8)
+        G: GameName
+    >(map: &Vec<FObjectExport>, names: &N, imports: &Vec<IoStoreObjectIndex>, file_name: &str, game_name: &G) -> Vec<ObjectExport2> {
+        // Convert FObjectImport into named ObjectImport
+        let mut resolves = vec![];
+        for (i, v) in map.into_iter().enumerate() {
+            println!("{}, {:?}", i, v);
+            resolves.push(v.resolve(names, imports, map, file_name, game_name));
+        }
+        resolves
+    }
+
+    pub fn map_to_buffer<W: Write, E: byteorder::ByteOrder>(map: &Vec<Self>, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        for i in map {
+            i.to_buffer::<W, E>(writer)?;
+        }
         Ok(())
     }
 
-    fn resolve<
-        G: GameName,
-        N: NameMap,
-    >(import: &FObjectExport, names: &N, file_name: &str, game_name: &G) -> impl ObjectExportWriter {
-        let cooked_serial_offset = import.serial_offset - 4; // PAK package serial offset - magic bytes
-        let cooked_serial_size = import.serial_size;
-        //let object_name = names.get_string_from_index(import.object_name.get_name_index() as usize).unwrap();
-        let object_name = MappedName {
-            name: names.get_string_from_index(import.object_name.get_name_index() as usize).unwrap(),
-            value: import.object_name
-        };
-        let outer_export = import.super_index;
-        //let class_name = names.get_string_from_package_index(import.class_index);
-        let class_name = match import.class_index {
-            i if i != 0 => Some(String::from(names.get_string_from_package_index(import.class_index).unwrap()) + "/" + object_name.name),
-            _ => None
-        };
-        println!("{:?}, {}", class_name, import.class_index);
-        let super_name = names.get_string_from_package_index(import.super_index);
-        let template_name = names.get_string_from_package_index(import.template_index);
-        let asset_proj_path = String::from(file_name) + "/" + object_name.name;
-        let global_import_name = match import.outer_index {
-            i if i > 0 => Some(game_name.project_path_to_game_path(&asset_proj_path).unwrap()),
-            _ => None
-        };
-        let object_flags = import.object_flags;
-        let filter_flags = 0; // EExportFilterFlags::None
-
-        ObjectExport2 {
-            cooked_serial_offset,
-            cooked_serial_size,
-            object_name,
-            outer_export,
-            class_name,
-            super_name,
-            template_name,
-            global_import_name,
-            object_flags,
-            filter_flags
-        }
+    pub fn to_buffer<W: Write, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_i64::<E>(self.cooked_serial_offset);
+        writer.write_i64::<E>(self.cooked_serial_size);
+        writer.write_u64::<E>(self.object_name.into())?; // object_name
+        self.outer_index.to_buffer::<W, E>(writer)?;
+        self.class_name.to_buffer::<W, E>(writer)?;
+        self.super_name.to_buffer::<W, E>(writer)?;
+        self.template_name.to_buffer::<W, E>(writer)?;
+        self.global_import_name.to_buffer::<W, E>(writer)?;
+        writer.write_u32::<E>(self.object_flags)?;
+        writer.write_u32::<E>(0)?; // filter flags
+        Ok(())
     }
 }
-
+/*
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ObjectExport3<'a> { // Unreal Engine 5.0+
@@ -442,11 +427,11 @@ pub struct ObjectExport3<'a> { // Unreal Engine 5.0+
     pub filter_flags: ExportFilterFlags
 }
 
-/*
+
 impl<'a> ObjectExportWriter for ObjectExport3<'a> {
 
 }
-*/
+
 
 pub trait ExportBundleHeader {
 
@@ -472,3 +457,4 @@ pub struct ExportBundleHeader5 { // Unreal Engine 5.0-5.2
 impl ExportBundleHeader for ExportBundleHeader5 {
 
 }
+*/
