@@ -57,9 +57,11 @@ namespace UTOC.Stream.Emulator
             // Check if there's a known route for this file, put this before actual file check because I/O
             // Check file type
             // Make the table of contents (UTOC) and partition (UCAS)
-            RustApi.PrintEmulatedFile(srcDataPath);
+            var result = RustApi.BuildTableOfContents(handle, srcDataPath, outputPath, route);
             stream = null;
-            return false;
+            return result;
         }
+
+        public void OnModLoading(string dir_path) => RustApi.AddFromFolders(dir_path);
     }
 }

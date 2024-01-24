@@ -9,7 +9,11 @@ namespace UTOC.Stream.Emulator
 {
     public static class RustApi
     {
+
         [DllImport("fileemu_utoc_stream_emulator")]
-        public static extern void PrintEmulatedFile(string file_path);
+        public static extern void AddFromFolders(string mod_path);
+
+        [DllImport("fileemu_utoc_stream_emulator")]
+        public static extern bool BuildTableOfContents(IntPtr handle, string srcDataPath, string outputPath, string route);
     }
 }

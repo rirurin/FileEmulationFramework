@@ -1,8 +1,16 @@
+use crate::toc_factory::{TocDirectory, TocDirectory2};
 use std::{
-    ffi::CStr,
+    ffi::{CStr, OsString},
+    fs,
+    io, io::Write,
     mem,
+    path::{Path, PathBuf},
+    ptr,
+    str::FromStr,
+    rc::Rc,
     os::raw::c_char
 };
+use windows::Win32::Foundation::HANDLE;
 
 // Package Types (these are contained inside of .PAK and .UCAS)
 // PAK Package
@@ -27,20 +35,68 @@ pub mod partition; // Parition builder
 pub mod reader; // stream reader
 pub mod string; // common Unreal types
 
+// Constant strings
+pub const TOC_EXTENSION:                    &'static str = ".utoc";
+pub const PARTITION_EXTENSION:              &'static str = ".ucas";
+pub const FILE_EMULATION_FRAMEWORK_FOLDER:  &'static str = "FEmulator";
+pub const EMULATOR_NAME:                    &'static str = "UTOC";
+pub const TARGET_TOC:                       &'static str = "UnrealEssentials_P.utoc";
+// Root TOC directory
+//pub static mut ROOT_DIRECTORY: Option<TocDirectory> = None;
+pub static mut ROOT_DIRECTORY: Option<Rc<TocDirectory2>> = None;
+
 #[no_mangle]
 #[allow(non_snake_case)]
-pub unsafe extern "C" fn PrintEmulatedFile(file_path: *const c_char) {
-    // make borrowed strings from params - C#'s GC will drop it 
-    let utoc_file = CStr::from_ptr(file_path).to_str().unwrap();
-    println!("IoStoreTocHeader size: {}", mem::size_of::<io_toc::IoStoreTocHeaderType3>());
-    println!("PrintEmulatedFile {}", utoc_file);
+pub unsafe extern "C" fn AddFromFolders(mod_path: *const c_char) {
+    let mod_path_cnv = CStr::from_ptr(mod_path).to_str().unwrap(); // convert directly to OsString
+    let mod_path: PathBuf = [mod_path_cnv, FILE_EMULATION_FRAMEWORK_FOLDER, EMULATOR_NAME, TARGET_TOC].iter().collect();
+    if Path::exists(Path::new(&mod_path)) {
+        // Mutating a global variable is UB in a multithreaded context
+        // Yes the compiler will complain about this
+        // https://doc.rust-lang.org/book/ch19-01-unsafe-rust.html#accessing-or-modifying-a-mutable-static-variable
+        /* 
+        if let None = ROOT_DIRECTORY {
+            unsafe { ROOT_DIRECTORY = Some(TocDirectory::new("ProjectName")) };
+        }
+        toc_factory::add_from_folders(&mut (ROOT_DIRECTORY.as_mut()).unwrap(), &mod_path);
+        */
+        if let None = ROOT_DIRECTORY {
+            unsafe { ROOT_DIRECTORY = Some(Rc::new(TocDirectory2::new("ProjectName"))) };
+        }
+        toc_factory::add_from_folders2(Rc::clone(&ROOT_DIRECTORY.as_ref().unwrap()), &mod_path);
+    }
 }
 
 #[no_mangle]
 #[allow(non_snake_case)]
 // haiiii Reloaded!!!! :3
-pub unsafe extern "C" fn TryGetEmulatedFile(_insert_params_here: usize) {
-    // ...
+pub unsafe extern "C" fn BuildTableOfContents(handle: HANDLE, srcDatPath: *const c_char, outputPath: *const c_char, route: *const c_char) -> bool {
+    // build TOC here
+    let path_check = PathBuf::from(CStr::from_ptr(srcDatPath).to_str().unwrap());
+    let file_name = path_check.file_name().unwrap().to_str().unwrap(); // unwrap, this is a file
+    false
+    /* 
+    if file_name == TARGET_TOC {
+        match &mut ROOT_DIRECTORY {
+            Some(root) => {
+                {
+                    let mut dir_count = 0;
+                    let mut file_count = 0;
+                    toc_factory::print_contents(root, &mut dir_count, &mut file_count);
+                }
+                toc_factory::build_table_of_contents(root);
+                false
+            },
+            None => {
+                //println!("WARNING: No mod files were fouind{}", file_name);
+                false
+            }
+        }
+    } else {
+        // Not our target TOC
+        false
+    }
+    */
 }
 
 #[cfg(test)]
@@ -48,12 +104,14 @@ mod tests {
     use byteorder::{ReadBytesExt, WriteBytesExt};
     use crate::{
         io_package::{IoStoreObjectIndex, ObjectImport, ObjectExport2},
+        io_toc::{IoStoreToc, IoStoreTocVersion},
         pak_package::{FObjectImport, FObjectExport, NameMap, NameMapImpl},
         partition::{GameName, GameNameImpl},
-        string::{FStringDeserializer, FStringSerializer, FStringSerializerText, FString16, FString32}
+        string::{FStringDeserializer, FStringSerializer, FStringSerializerText, FString16, FString32},
+        toc_factory,
     };
     use std::{
-        fs::File,
+        fs, fs::File,
         fmt,
         io::{
             Cursor, Read, Write
@@ -78,11 +136,12 @@ mod tests {
         // and check against [filename]_out.bin in test_resources
         assert_eq!(get_test_file(String::from(file) + "_out"), stream, "Exported byte streams don't match");
     }
-
+    // Tests for converting cooked packages to IO store packages
+    // Current process without this would require packaging with IO Store, then using UnZen to extract packages
     #[test]
     fn convert_name_map_texture() {
         // Converts a name map for a PAK package into an IO Store name map. FString16 names are written first, followed by hashes
-        let mut reader = Cursor::new(get_test_file("name_map_texture_in")); // Name map block from T_Chair_M.uasset
+        let mut reader = Cursor::new(fs::read("test_resources/name_map_texture_in.bin").unwrap()); // Name map block from T_Chair_M.uasset
         let name_map = NameMapImpl::new_from_buffer::<CV, FString32, NE>(&mut reader, 15);
         let mut writer = Cursor::new(vec![]);
         name_map.to_buffer_two_blocks::<CV, FString16, NE>(&mut writer); // two blocks for IO Store stream
@@ -91,7 +150,7 @@ mod tests {
 
     #[test]
     fn convert_name_map_particle() {
-        let mut reader = Cursor::new(get_test_file("name_map_particle_in")); // Name map from P_Explosion.uasset
+        let mut reader = Cursor::new(fs::read("test_resources/name_map_particle_in.bin").unwrap()); // Name map from P_Explosion.uasset
         let name_map = NameMapImpl::new_from_buffer::<CV, FString32, NE>(&mut reader, 219);
         let mut writer = Cursor::new(vec![]);
         name_map.to_buffer_two_blocks::<CV, FString16, NE>(&mut writer);
@@ -104,7 +163,7 @@ mod tests {
         let game_name = GameNameImpl::new("TestingSrc", "Game");
         let file_name = String::from(format!("/{}/Content/StarterContent/Textures/T_Chair_M", game_name.get_project_name()));
 
-        let mut name_map_reader = Cursor::new(get_test_file("name_map_texture_in"));
+        let mut name_map_reader = Cursor::new(fs::read("test_resources/name_map_texture_in.bin").unwrap());
         let name_map = NameMapImpl::new_from_buffer::<CV, FString32, NE>(&mut name_map_reader, 15); // import name map first
         let mut reader = Cursor::new(get_test_file("import_export_map_texture_in")); // we also need to read imports
         let import_map = FObjectImport::build_map::<CV, NE>(&mut reader, 3); // 3 imports
@@ -138,6 +197,46 @@ mod tests {
         ObjectExport2::map_to_buffer::<CV, NE>(&export_map, &mut writer);
         write_to_file("import_export_map_particle", &writer.into_inner());
         //write_and_assert("import_map_particle", writer.into_inner());
+    }
+
+    // Define an OsPath field and a TocPath field
+
+    fn collect_asset_files(mount: &str, path: &str) -> Vec<String> {
+        let mut files: Vec<String> = vec![];
+        for i in fs::read_dir(path).unwrap() {
+            let curr_file = i.unwrap();
+            let file_type = curr_file.file_type().unwrap();
+            let file_name = mount.to_owned() + "/" + &curr_file.file_name().into_string().unwrap();
+            if file_type.is_file() {
+                files.push(file_name);
+            } else if file_type.is_dir() {
+                let dir_name = curr_file.file_name().into_string().unwrap();
+                let os_dir_path = path.to_owned() + "/" + &dir_name;
+                let toc_dir_path = mount.to_owned() + "/" + &dir_name;
+                println!("{}", os_dir_path);
+                files.extend(collect_asset_files(&toc_dir_path, &os_dir_path));
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn create_toc_test_ue427() {
+        // root OS file location is "/FEmulator/UTOC/UnrealEssentials.UTOC/", which is equivalent to ../../../TestingSrc/Content
+        // that's where we start checking - mount root will be set based on first directory to contain multiple objects (files or directories)
+        // go through the list of files inside of the virtual TOC
+        // first string will contain the project name, then content
+        // first directory has no name, only a child
+        // collect_file_structure
+        // 
+        //let mount_root = "../../.."; // WindowsNoEditor/Engine/Binaries/Win64 => WindowsNoEditor
+        /* 
+        for i in collect_asset_files(mount_root, asset_location) {
+            println!("{}", i);
+        }
+        */
+        // toc factory: write a toc of a particular type
+        //let toc = IoStoreToc::new(IoStoreTocVersion::Initial, "pakchunk0", 5);
     }
     // TODO: Figure out what's going on with export bundles and graph data 
     // Also the last block of bytes at the end of IO Store packages (partition layout related?)

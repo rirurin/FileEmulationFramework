@@ -41,6 +41,11 @@ pub trait FStringSerializerBlockAlign {
         to_buffer_alignment_super::<Self, W, E>(writer);
     }
 }
+pub trait FStringSerializerExpectedLength {
+    // Get the expected length in bytes of a serialized string given a string slice
+    // In param has to be a string slice since there's no "Length" trait
+    fn get_expected_length(value: &str) -> u64;
+}
 
 // Workaround since it's not possible to extend a trait method's default implementation
 // (Java classes in university gave me OOP brainrot)
@@ -86,7 +91,8 @@ impl FString32NoHash {
     }
 
     fn to_buffer_text_inner<W: Write, E: byteorder::ByteOrder>(rstr: &str, writer: &mut W) -> Result<(), Box<dyn Error>> {
-        let len: u32 = rstr.len().try_into()?;
+        // add an extra byte for null terminator
+        let len = (rstr.len() + if !rstr.ends_with("\0") { 1 } else { 0 }) as u32;
         writer.write_u32::<E>(len)?;
         writer.write_all(rstr.as_bytes());
         if !rstr.ends_with("\0") {
@@ -113,6 +119,12 @@ impl FStringSerializerText for FString32NoHash {
         // check to see if our string has a null terminator, if we've made it in Rust, it won't, and if it's an import from another
         // Unreal stream, it shouldn't
         FString32NoHash::to_buffer_text_inner::<W, E>(rstr, writer)
+    }
+}
+impl FStringSerializerExpectedLength for FString32NoHash {
+    fn get_expected_length(value: &str) -> u64 {
+        let str_len = (value.len() + if !value.ends_with("\0") { 1 } else { 0 }) as u64; // include null terminator
+        str_len + 4 // 4 bytes at beginning to define string length
     }
 }
 
@@ -205,7 +217,7 @@ impl FStringSerializerBlockAlign for FString16 {
 
 pub struct Hasher;
 impl Hasher {
-    fn get_cityhash64(bytes: &str) -> u64 {
+    pub fn get_cityhash64(bytes: &str) -> u64 {
         let to_hash = String::from(bytes).to_lowercase();
         cityhasher::hash(to_hash.as_bytes())
     }

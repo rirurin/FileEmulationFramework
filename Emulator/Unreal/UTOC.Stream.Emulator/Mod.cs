@@ -83,11 +83,12 @@ namespace UTOC.Stream.Emulator
         private void OnLoaderInit()
         {
             _modLoader.OnModLoaderInitialized -= OnLoaderInit;
-            // call OnLoaderInit on Rust side
+            _modLoader.ModLoading -= OnModLoading;
+            _modLoader.ModUnloading -= OnModUnloading;
         }
         private void OnModLoading(IModV1 mod, IModConfigV1 conf)
         {
-            // call OnModLoading on Rust side
+            _emu.OnModLoading(_modLoader.GetDirectoryForModId(conf.ModId));
         }
         private void OnModUnloading(IModV1 mod, IModConfigV1 conf)
         {

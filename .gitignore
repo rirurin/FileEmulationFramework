@@ -351,3 +351,4 @@ MigrationBackup/
 # For Unreal Emulator: Rust stuff
 Emulator/Unreal/fileemu-utoc-stream-emulator/target
 Emulator/Unreal/fileemu-utoc-stream-emulator/test_results
+Cargo.lock
