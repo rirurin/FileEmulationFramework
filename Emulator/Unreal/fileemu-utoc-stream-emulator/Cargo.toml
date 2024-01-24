@@ -18,7 +18,8 @@ features = [
 ]
 
 [lib]
-crate-type = ["cdylib"]
+# cdylib for support with Reloaded, rlib for support with other Rust programs for testing
+crate-type = ["cdylib", "rlib"]
 
 [lints.rust]
 unused_imports = "allow"

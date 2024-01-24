@@ -104,8 +104,25 @@ impl TocDirectory2 {
         replacer: Rc<TocFile2> // file that'll take the place of replacee in the chain
     ) {
         println!("REPLACE FILE IN {}: SWAP {} WITH {}", dir.name, replacee.name, replacer.name);
+        if prev_file.as_ref() != None {
+            //*Rc::clone(prev_file.as_ref().unwrap()).next.borrow_mut() = Some(Rc::clone(&replacer));
+        }
+        /* 
+        if prev_file == None {
+            println!("FILE {} IS FIRST FILE", replacee.name);
+        } else { // prev -> replacee TO prev -> replacer
+            //println!("prev_file strong count: {}", Rc::strong_count(&prev_file.unwrap()));
+            *Rc::clone(&prev_file.unwrap()).next.borrow_mut() = Some(Rc::clone(&replacer));
+        }
+        */
+
+
+
+        /* 
         if prev_file != None {
             *prev_file.unwrap().next.borrow_mut() = Some(Rc::clone(&replacer)); // prev -> replacee TO prev -> replacer
+        } else {
+            println!("FILE {} IS FIRST FILE", replacee.name);
         }
         *replacee.next.borrow_mut() = None; // replacee -> next TO replacee -> NULL
         // It's possible that replacee is the last file in the chain, so we'll need to account for that
@@ -115,16 +132,13 @@ impl TocDirectory2 {
         } else {
             *replacer.next.borrow_mut() = Some(Rc::clone(replacee.next.borrow().as_ref().unwrap())); // replacer -> NULL to replacer -> next
         }
+        */
     }
     // Add a file to the end of the directory's file list, which contains at least 1 existing file
     #[inline]
     fn add_another_file(dir: Rc<TocDirectory2>, file: Rc<TocFile2>) {
         println!("ADD ANOTHER FILE ONTO {}: NAME {}", dir.name, file.name);
-        if dir.last_file.borrow().upgrade() == None {
-            println!("LAST FILE IS MISSING??? THIS ISN'T CORRECT");            
-        } else {
-            *dir.last_file.borrow().upgrade().unwrap().next.borrow_mut() = Some(Rc::clone(&file)); // own our new child on the end of children linked list
-        }
+        *dir.last_file.borrow().upgrade().unwrap().next.borrow_mut() = Some(Rc::clone(&file)); // own our new child on the end of children linked list
         *dir.last_file.borrow_mut() = Rc::downgrade(&file); // and set the tail to weakref of the new child
     }
     // go through file list to check if the target file already exists, then replace it with our own
@@ -132,31 +146,33 @@ impl TocDirectory2 {
     pub fn add_or_replace_file(dir: Rc<TocDirectory2>, file: Rc<TocFile2>) {
         match TocDirectory2::has_files(Rc::clone(&dir)) {
             true => { // :adachi_true: - search file linked list
+                let mut found = false;
                 let mut prev: Option<Rc<TocFile2>> = None;
                 let mut curr_file = Rc::clone(dir.first_file.borrow().as_ref().unwrap());
-                let mut found = false;
                 loop {
                     if curr_file.name == file.name { // we got the file, replace it
-                        TocDirectory2::replace_file(
-                            Rc::clone(&dir), 
-                            //Rc::clone(prev.as_ref().unwrap()), 
-                            prev,
-                            Rc::clone(&curr_file),
-                            Rc::clone(&file)
-                        );
                         found = true;
-                        break;
+                        break
                     }
-                    match Rc::clone(&curr_file).next.borrow().as_ref() {
+                    match Rc::clone(&curr_file).next.borrow().as_ref() { // check if next points to next entry in chain or ends the chain
                         Some(f) => {
                             prev = Some(Rc::clone(&curr_file));
                             curr_file = Rc::clone(&f);
                         },
-                        None => break // couldn't find it to replace, add it to the end
+                        None => { // couldn't find it to replace, add it to the end
+                            break // we need to escape this scope to prevent creating mut ref of last_file->next while const ref last_file->next is still valid
+                        }
                     }
                 }
                 if !found {
                     TocDirectory2::add_another_file(Rc::clone(&dir), Rc::clone(&file));
+                } else {
+                    TocDirectory2::replace_file(
+                        Rc::clone(&dir),
+                        prev, // prev is only set with second file in list onwards
+                        Rc::clone(&curr_file),
+                        Rc::clone(&file)
+                    );
                 }
             },
             false => TocDirectory2::add_first_file(Rc::clone(&dir), Rc::clone(&file))
@@ -289,7 +305,7 @@ pub fn add_from_folders2(parent: Rc<TocDirectory2>, os_path: &PathBuf) {
     // at least ../../../[ProjectName] (../../../Game/)
     // build an unsorted n-tree of directories and files, preorder traversal
     // higher priority mods should overwrite contents of files, but not directories
-    println!("add_from_folders2: {}", os_path.to_str().unwrap());
+    //println!("add_from_folders2: {}", os_path.to_str().unwrap());
     for i in fs::read_dir(os_path).unwrap() {
         match &i {
             Ok(fs_obj) => { // we have our file system object, now determine if it's a directory or folder
@@ -342,6 +358,39 @@ pub fn print_contents(root: &TocDirectory, dir_count: &mut i32, file_count: &mut
     for i in &root.files {
         println!("FILE {} : Directory {} contains file {}, {}", *file_count, root.name, i.name, i.file_size);
         *file_count += 1;
+    }
+}
+pub fn print_contents2(dir: Rc<TocDirectory2>, dir_count: &mut i32, file_count: &mut i32) {
+    // just for debugging...
+    println!("DIR {}: NAME {}", *dir_count, &dir.name);
+    *dir_count += 1;
+    // get inner directories
+    match dir.first_child.borrow().as_ref() {
+        Some(inner) => {
+            let mut inner_dir = Rc::clone(inner);
+            loop {
+                print_contents2(Rc::clone(&inner_dir), dir_count, file_count);
+                match Rc::clone(&inner_dir).next_sibling.borrow().as_ref() {
+                    Some(next) => {
+                        inner_dir = Rc::clone(&next);
+                    },
+                    None => break,
+                }
+            }
+        },
+        None => ()
+    };
+    // get inner files
+    if let Some(f) = dir.first_file.borrow().as_ref() {
+        let mut inner_file = Rc::clone(f);
+        loop {
+            println!("FILE {}: NAME {}", *file_count, &inner_file.name);
+            *file_count += 1;
+            match Rc::clone(&inner_file).next.borrow().as_ref() {
+                Some(next) => inner_file = Rc::clone(next),
+                None => break
+            }
+        }
     }
 }
 
@@ -440,6 +489,18 @@ impl TocResolver {
         }
         values
     }
+    pub fn flatten_toc_tree_2(&mut self, root: Rc<TocDirectory2>) {
+
+    }
+    pub fn create_chunk_id() {
+
+    }
+    pub fn create_chunk_partition_blocks() {
+        // Consisting of the file location and size, and one or more compression blocks required to hold the file (alignment 0x10)
+    }
+    pub fn create_file_meta() {
+        // As a placeholder, set the hash to 0 (I haven't yet checked to see how meta hash is created)
+    }
 }
 
 // TODO: Set the mount point further up in mods where the file structure doesn't diverge at root
@@ -465,4 +526,22 @@ pub fn build_table_of_contents(root: &mut TocDirectory) {
     // Set appropriate FIooffsetAndLengths, according to a compression size
     // The last entry for chunk ids and offsets will be container header (data that we generate)
     // idk how meta data works yet
+}
+
+// TODO: Set the mount point further up in mods where the file structure doesn't diverge at root
+// TODO: Pass version param (probably as trait) to customize how TOC is produced depenending on the target version
+// TODO: Handle creating multiple partitions (not important but would help make this more feature complete)
+pub fn build_table_of_contents2(root: Rc<TocDirectory2>) {
+    println!("TODO: BUILD TABLE OF CONTENTS");
+    // flatten our tree into a list by pre-order traversal
+    let mut resolver = TocResolver::new();
+    resolver.flatten_toc_tree_2(Rc::clone(&root));
+    // Get DirectoryIndexSize = MountPoint + Directory Entries + File Entries + Strings
+    let mount_point_bytes = FString32NoHash::get_expected_length(MOUNT_POINT);
+    let directory_index_bytes = resolver.directories.len() * std::mem::size_of::<IoDirectoryIndexEntry>();
+    let file_index_bytes = resolver.directories.len() * std::mem::size_of::<IoFileIndexEntry>();
+    let mut string_index_bytes = 0;
+    resolver.strings.iter().for_each(|name| string_index_bytes += FString32NoHash::get_expected_length(name));
+    println!("Mount point {}, dir index: {}, file index: {}, strings {}", mount_point_bytes, directory_index_bytes, file_index_bytes, string_index_bytes);
+
 }

@@ -41,29 +41,32 @@ pub const PARTITION_EXTENSION:              &'static str = ".ucas";
 pub const FILE_EMULATION_FRAMEWORK_FOLDER:  &'static str = "FEmulator";
 pub const EMULATOR_NAME:                    &'static str = "UTOC";
 pub const TARGET_TOC:                       &'static str = "UnrealEssentials_P.utoc";
-// Root TOC directory
+// Root TOC directory (needs to be global)
 //pub static mut ROOT_DIRECTORY: Option<TocDirectory> = None;
 pub static mut ROOT_DIRECTORY: Option<Rc<TocDirectory2>> = None;
 
 #[no_mangle]
 #[allow(non_snake_case)]
+// API for FFI (cdylib)
 pub unsafe extern "C" fn AddFromFolders(mod_path: *const c_char) {
-    let mod_path_cnv = CStr::from_ptr(mod_path).to_str().unwrap(); // convert directly to OsString
-    let mod_path: PathBuf = [mod_path_cnv, FILE_EMULATION_FRAMEWORK_FOLDER, EMULATOR_NAME, TARGET_TOC].iter().collect();
+    add_from_folders(CStr::from_ptr(mod_path).to_str().unwrap());
+}
+
+// API for other Rust programs (rlib)
+pub fn add_from_folders(mod_path: &str) {
+    let mod_path: PathBuf = [mod_path, FILE_EMULATION_FRAMEWORK_FOLDER, EMULATOR_NAME, TARGET_TOC].iter().collect();
     if Path::exists(Path::new(&mod_path)) {
         // Mutating a global variable is UB in a multithreaded context
         // Yes the compiler will complain about this
         // https://doc.rust-lang.org/book/ch19-01-unsafe-rust.html#accessing-or-modifying-a-mutable-static-variable
-        /* 
-        if let None = ROOT_DIRECTORY {
-            unsafe { ROOT_DIRECTORY = Some(TocDirectory::new("ProjectName")) };
+        unsafe {
+            if let None = ROOT_DIRECTORY {
+                ROOT_DIRECTORY = Some(Rc::new(TocDirectory2::new("ProjectName")));
+            }
+            toc_factory::add_from_folders2(Rc::clone(&ROOT_DIRECTORY.as_ref().unwrap()), &mod_path);
         }
-        toc_factory::add_from_folders(&mut (ROOT_DIRECTORY.as_mut()).unwrap(), &mod_path);
-        */
-        if let None = ROOT_DIRECTORY {
-            unsafe { ROOT_DIRECTORY = Some(Rc::new(TocDirectory2::new("ProjectName"))) };
-        }
-        toc_factory::add_from_folders2(Rc::clone(&ROOT_DIRECTORY.as_ref().unwrap()), &mod_path);
+    } else {
+        println!("WARNING: Mod path at {} doesn't exist", mod_path.to_str().unwrap());
     }
 }
 
@@ -71,24 +74,30 @@ pub unsafe extern "C" fn AddFromFolders(mod_path: *const c_char) {
 #[allow(non_snake_case)]
 // haiiii Reloaded!!!! :3
 pub unsafe extern "C" fn BuildTableOfContents(handle: HANDLE, srcDatPath: *const c_char, outputPath: *const c_char, route: *const c_char) -> bool {
+    let src_data_path_slice = CStr::from_ptr(srcDatPath).to_str().unwrap();
+    build_table_of_contents(handle, &src_data_path_slice) // srcDatPath, outputPath and route are all currently the same (params passed from FileEmulationFramework)
+}
+
+pub fn build_table_of_contents(handle: HANDLE, src_data_path: &str) -> bool {
     // build TOC here
-    let path_check = PathBuf::from(CStr::from_ptr(srcDatPath).to_str().unwrap());
+    let path_check = PathBuf::from(src_data_path);
     let file_name = path_check.file_name().unwrap().to_str().unwrap(); // unwrap, this is a file
-    false
-    /* 
+    println!("call build_toc on dummy toc {}", file_name);
     if file_name == TARGET_TOC {
-        match &mut ROOT_DIRECTORY {
+        match unsafe { &ROOT_DIRECTORY } {
             Some(root) => {
+                println!("Mod files were loaded for {}", file_name);
                 {
                     let mut dir_count = 0;
                     let mut file_count = 0;
-                    toc_factory::print_contents(root, &mut dir_count, &mut file_count);
+                    toc_factory::print_contents2(Rc::clone(&root), &mut dir_count, &mut file_count);
+                    println!("{} DIRECTORIES, {} FILES", dir_count, file_count);
                 }
-                toc_factory::build_table_of_contents(root);
+                toc_factory::build_table_of_contents2(Rc::clone(root));
                 false
             },
             None => {
-                //println!("WARNING: No mod files were fouind{}", file_name);
+                println!("WARNING: No mod files were loaded for {}", file_name);
                 false
             }
         }
@@ -96,7 +105,14 @@ pub unsafe extern "C" fn BuildTableOfContents(handle: HANDLE, srcDatPath: *const
         // Not our target TOC
         false
     }
-    */
+}
+
+pub fn print_toc_contents_debug() {
+    let root = unsafe { Rc::clone(ROOT_DIRECTORY.as_ref().unwrap()) };
+    let mut dir_count = 0;
+    let mut file_count = 0;
+    toc_factory::print_contents2(root, &mut dir_count, &mut file_count);
+    println!("{} DIRECTORIES, {} FILES", dir_count, file_count);
 }
 
 #[cfg(test)]
