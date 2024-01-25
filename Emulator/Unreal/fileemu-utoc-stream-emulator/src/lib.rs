@@ -75,12 +75,13 @@ pub fn add_from_folders(mod_path: &str) {
 // haiiii Reloaded!!!! :3
 pub unsafe extern "C" fn BuildTableOfContents(handle: HANDLE, srcDatPath: *const c_char, outputPath: *const c_char, route: *const c_char) -> bool {
     let src_data_path_slice = CStr::from_ptr(srcDatPath).to_str().unwrap();
-    build_table_of_contents(handle, &src_data_path_slice) // srcDatPath, outputPath and route are all currently the same (params passed from FileEmulationFramework)
+    let output_data_path_slice = CStr::from_ptr(srcDatPath).to_str().unwrap();
+    build_table_of_contents(handle, &src_data_path_slice, &output_data_path_slice)
 }
 
-pub fn build_table_of_contents(handle: HANDLE, src_data_path: &str) -> bool {
+pub fn build_table_of_contents(handle: HANDLE, toc_path: &str, part_path: &str) -> bool {
     // build TOC here
-    let path_check = PathBuf::from(src_data_path);
+    let path_check = PathBuf::from(toc_path);
     let file_name = path_check.file_name().unwrap().to_str().unwrap(); // unwrap, this is a file
     println!("call build_toc on dummy toc {}", file_name);
     if file_name == TARGET_TOC {
@@ -93,7 +94,7 @@ pub fn build_table_of_contents(handle: HANDLE, src_data_path: &str) -> bool {
                     toc_factory::print_contents2(Rc::clone(&root), &mut dir_count, &mut file_count);
                     println!("{} DIRECTORIES, {} FILES", dir_count, file_count);
                 }
-                toc_factory::build_table_of_contents2(Rc::clone(root));
+                toc_factory::build_table_of_contents2(handle, Rc::clone(root), toc_path, part_path);
                 false
             },
             None => {
@@ -235,25 +236,12 @@ mod tests {
         }
         files
     }
-
+    /* 
+    TOC Building Tests moved to toc-builder-test
     #[test]
     fn create_toc_test_ue427() {
-        // root OS file location is "/FEmulator/UTOC/UnrealEssentials.UTOC/", which is equivalent to ../../../TestingSrc/Content
-        // that's where we start checking - mount root will be set based on first directory to contain multiple objects (files or directories)
-        // go through the list of files inside of the virtual TOC
-        // first string will contain the project name, then content
-        // first directory has no name, only a child
-        // collect_file_structure
-        // 
-        //let mount_root = "../../.."; // WindowsNoEditor/Engine/Binaries/Win64 => WindowsNoEditor
-        /* 
-        for i in collect_asset_files(mount_root, asset_location) {
-            println!("{}", i);
-        }
-        */
-        // toc factory: write a toc of a particular type
-        //let toc = IoStoreToc::new(IoStoreTocVersion::Initial, "pakchunk0", 5);
     }
+    */
     // TODO: Figure out what's going on with export bundles and graph data 
     // Also the last block of bytes at the end of IO Store packages (partition layout related?)
     /*

@@ -1,14 +1,16 @@
 use bitflags::bitflags;
-use crate::string::{Hasher, Hasher16};
+use byteorder::WriteBytesExt;
+use crate::string::{FString32NoHash, FStringSerializer, Hasher, Hasher16};
 use std::{
     error::Error,
-    io::{Seek, Write}
+    io::{Cursor, Seek, SeekFrom, Write}
 };
 
 pub type IoContainerId = u64; // TODO: ContainerID is a UID as a CityHash64 of the container name
                               // represent that with a distinct CityHashID type
 pub type GUID = u128;
 
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 #[repr(u8)]
 #[allow(dead_code)]
 // One byte sized enum
@@ -20,7 +22,33 @@ pub enum IoStoreTocVersion {
     PartitionSize, // added in UE 4.27
     PerfectHash, // added in UE 5.0
     PerfectHashWithOverflow, // also added in UE 5.0
-    LatestPlusOne
+    //LatestPlusOne
+}
+
+impl From<IoStoreTocVersion> for u8 {
+    fn from(val: IoStoreTocVersion) -> u8 {
+        match val {
+            IoStoreTocVersion::Invalid => 0,
+            IoStoreTocVersion::Initial => 1,
+            IoStoreTocVersion::DirectoryIndex => 2,
+            IoStoreTocVersion::PartitionSize => 3,
+            IoStoreTocVersion::PerfectHash => 4,
+            IoStoreTocVersion::PerfectHashWithOverflow => 5,
+        }
+    }
+}
+
+impl From<u8> for IoStoreTocVersion {
+    fn from(val: u8) -> IoStoreTocVersion {
+        match val {
+            1 => IoStoreTocVersion::Initial,
+            2 => IoStoreTocVersion::DirectoryIndex,
+            3 => IoStoreTocVersion::PartitionSize,
+            4 => IoStoreTocVersion::PerfectHash,
+            5 => IoStoreTocVersion::PerfectHashWithOverflow,
+            _ => panic!("ERROR: Cannot create an IoStoreTocVersion from value {}", val)
+        }
+    }
 }
 
 bitflags! {
@@ -39,6 +67,7 @@ bitflags! {
 pub const IO_STORE_TOC_MAGIC: &[u8] = b"-==--==--==--==-"; // const stored as static string slice
                                                            // since std::convert::TryInto is not
                                                            // const
+pub const IO_STORE_TOC_MAGIC2: [u8; 0x10] = *b"-==--==--==--==-";
 
 pub enum IoStoreToc {
     Initial(IoStoreTocHeaderType1),
@@ -125,6 +154,53 @@ pub struct IoStoreTocHeaderType3 { // Unreal Engine 4.27 (size: 0x90)
     container_flags: IoContainerFlags,
     partition_size: u64,
     reserved: [u64; 6]
+}
+
+impl IoStoreTocHeaderType3 {
+    pub fn new(container_id: u64, entries: u32, compressed_blocks: u32, compression_block_size: u32, dir_index_size: u32) -> Self {
+        Self {
+            toc_magic: IO_STORE_TOC_MAGIC2,
+            version: IoStoreTocVersion::PartitionSize,
+            toc_header_size: std::mem::size_of::<IoStoreTocHeaderType3>() as u32,
+            toc_entry_count: entries,
+            toc_compressed_block_entry_count: compressed_blocks,
+            toc_compressed_block_entry_size: std::mem::size_of::<IoStoreTocCompressedBlockEntry>() as u32, // for sanity checking
+            compression_method_name_count: 0,
+            compression_method_name_length: 0,
+            compression_block_size,
+            directory_index_size: dir_index_size,
+            partition_count: 1,
+            container_id,
+            encryption_key_guid: 0,
+            container_flags: IoContainerFlags::Indexed,
+            partition_size: u64::MAX,
+            reserved: [0; 6]
+        }
+    }
+    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_all(self.toc_magic.as_slice())?; // 0x0
+        writer.write_u8(self.version.into())?;
+        writer.write_u24::<E>(0)?; // padding
+        writer.write_u32::<E>(self.toc_header_size);
+        writer.write_u32::<E>(self.toc_entry_count);
+        writer.write_u32::<E>(self.toc_compressed_block_entry_count);
+        writer.write_u32::<E>(self.toc_compressed_block_entry_size);
+        writer.write_u32::<E>(self.compression_method_name_count);
+        writer.write_u32::<E>(self.compression_method_name_length);
+        writer.write_u32::<E>(self.compression_block_size);
+        writer.write_u32::<E>(self.directory_index_size);
+        writer.write_u32::<E>(self.partition_count);
+        writer.write_u64::<E>(self.container_id);
+        writer.write_u128::<E>(self.encryption_key_guid);
+        writer.write_u8(self.container_flags.bits());
+        writer.write_u24::<E>(0)?; // padding
+        writer.write_u32::<E>(0)?; // padding
+        writer.write_u64::<E>(self.partition_size)?;
+        for _ in 0..6 {
+            writer.write_u64::<E>(0)?; // padding
+        }
+        Ok(())
+    }
 }
 
 #[repr(C)]
@@ -266,25 +342,29 @@ impl From<IoChunkType5> for u8 {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
-#[repr(C)] // This is the same across all versions of IO Store UE that i'm aware of
+#[repr(C/* , align(4)*/)] // This is the same across all versions of IO Store UE that i'm aware of
 pub struct IoChunkId {
-    id: [u8; 0xc]
+    //id: [u8; 0xc]
+    hash: u64,
+    index: u16,
+    obj_type: IoChunkType4
 }
 
 impl IoChunkId {
     pub fn new(path: &str, chunk_type: IoChunkType4) -> Self {
-        let mut id: [u8; 0xc] = [0; 0xc];
-        let chunk_id = Hasher16::get_cityhash64(path).to_ne_bytes(); // ChunkId
-        // NOTE: find a way to directly copy u64 into a u8 slice (probably will require unsafe)
-        for (i, v) in chunk_id.iter().enumerate() {
-            id[i] = *v;
-        }
-        let chunk_index = 0_u16.to_ne_bytes();
-        for (i, v) in chunk_index.iter().enumerate() {
-            id[i + 8] = *v;
-        }
-        id[11] = chunk_type.into(); // chunk type
-        Self { id }
+        let hash = Hasher16::get_cityhash64(path); // ChunkId
+        let index = 0;
+        let pad = 0;
+        let obj_type = chunk_type;
+        Self { hash, index, obj_type }
+    }
+    // TODO: split to_buffer off as a trait method
+    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_u64::<E>(self.hash)?; // 0x0
+        writer.write_u16::<E>(self.index)?; // 0x8
+        writer.write_u8(0)?; // 0xa: padding
+        writer.write_u8(self.obj_type.into())?; // 0xb
+        Ok(())
     }
 } 
 
@@ -295,21 +375,25 @@ pub struct IoOffsetAndLength {
     data: [u8; 0xa]
 }
 
+pub const IO_OFFSET_LENGTH_MAX: u64 = 0xFFFFFFFFFF; // 5 bytes (~1.1 TB)
+pub const IO_COMPRESSED_BLOCK_LENGTH_MAX: u32 = 0xFFFFFF; // 3 bytes (16.7 MB)
+
 impl IoOffsetAndLength {
-    pub fn new(offset: u32, length: u32) -> Self {
-        let mut data = [0; 0xa];
-        for (i, v) in offset.to_ne_bytes().iter().enumerate() {
-            data[i + 1] = *v;
-        }
-        for (i, v) in length.to_ne_bytes().iter().enumerate() {
-            data[i + 6] = *v;
-        }
-        Self {data}
+    // TODO: proper error handling for offset/length values above IO_OFFSET_LENGTH_MAX
+    pub fn new(offset: u64, length: u64) -> Self {
+        type ByteBlock = Cursor<[u8; 0xa]>;
+        type E = byteorder::BigEndian;
+        let mut byte_builder = Cursor::new([0; 0xa]);
+        byte_builder.seek(SeekFrom::Current(1)); // 0x0
+        byte_builder.write_u32::<E>(offset as u32).unwrap(); // 0x1
+        byte_builder.seek(SeekFrom::Current(1)); // 0x5
+        byte_builder.write_u32::<E>(length as u32).unwrap(); // 0x6
+        Self {data: byte_builder.into_inner()}
     }
-    /* 
-    pub fn new(offset: u64, length: u64) -> Result<Self, String> {
+    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_all(self.data.as_slice())?;
+        Ok(())
     }
-    */
 }
 
 // (UE 5 ONLY) Perfect Hash
@@ -323,9 +407,16 @@ pub struct IoStoreTocCompressedBlockEntry {
 }
 
 impl IoStoreTocCompressedBlockEntry {
-    pub fn new(offset: u32, length: u32) -> Self {
-        let data = [0; 0xc];
-        Self {data}
+    pub fn new(offset: u64, length: u32) -> Self {
+        type ByteBlock = Cursor<[u8; 0xc]>;
+        type E = byteorder::BigEndian;
+        let mut byte_builder = Cursor::new([0; 0xc]);
+        byte_builder.seek(SeekFrom::Current(1)); // 0x0
+        byte_builder.write_u32::<E>(offset as u32).unwrap();
+        let cmp_size = &length.to_be_bytes()[0..3];
+        byte_builder.write_all(cmp_size).unwrap(); // cmp_size
+        byte_builder.write_all(cmp_size).unwrap(); // decmp_size
+        Self { data: byte_builder.into_inner() }
     }
     pub fn get_offset(&self) -> u32 {
         u32::from_ne_bytes(self.data[1..5].try_into().unwrap())
@@ -337,6 +428,10 @@ impl IoStoreTocCompressedBlockEntry {
             out[i + 1] = *v;
         }
         u32::from_ne_bytes(out)
+    }
+    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_all(self.data.as_slice())?;
+        Ok(())
     }
     /* 
     // this likely won't need to fail since toc builder would've rejected file when creating offset + length
@@ -366,13 +461,63 @@ pub struct IoDirectoryIndexEntry {
     pub first_file: u32
 }
 
+impl IoDirectoryIndexEntry {
+    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_u32::<E>(self.name)?;
+        writer.write_u32::<E>(self.first_child)?;
+        writer.write_u32::<E>(self.next_sibling)?;
+        writer.write_u32::<E>(self.first_file)?;
+        Ok(())
+    }
+
+    pub fn list_to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(list: &Vec<IoDirectoryIndexEntry>, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_u32::<E>(list.len() as u32)?;
+        for i in list {
+            i.to_buffer::<W, E>(writer)?;
+        }
+        Ok(())
+    }
+}
+
+pub const IO_FILE_INDEX_ENTRY_SERIALIZED_SIZE: usize = 0xc;
+
 #[derive(Debug)]
 #[repr(C/*, align(1)*/)]
 #[allow(dead_code)]
 pub struct IoFileIndexEntry {
     pub name: u32, // entry to string index
     pub next_file: u32,
-    pub user_data: u32 // id for FIoChunkId, and FIoOffsetAndLength
+    pub user_data: u32, // id for FIoChunkId, and FIoOffsetAndLength
+    pub os_path: String // THIS WILL NOT GET SERIALIZED
+}
+
+impl IoFileIndexEntry {
+    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_u32::<E>(self.name)?;
+        writer.write_u32::<E>(self.next_file)?;
+        writer.write_u32::<E>(self.user_data)?;
+        Ok(())
+    }
+
+    pub fn list_to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(list: &Vec<IoFileIndexEntry>, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_u32::<E>(list.len() as u32)?;
+        for i in list {
+            i.to_buffer::<W, E>(writer)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct IoStringPool;
+
+impl IoStringPool {
+    pub fn list_to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(list: &Vec<String>, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_u32::<E>(list.len() as u32)?;
+        for i in list {
+            FString32NoHash::to_buffer::<W, E>(i, writer)?;
+        }
+        Ok(())
+    }
 }
 
 // NON NATIVE - REQUIRES SERIALIZATION
@@ -399,5 +544,10 @@ impl IoStoreTocEntryMeta {
         let hash = [0; 0x20];
         let flags = 0;
         Self { hash, flags }
+    }
+    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_all(self.hash.as_slice())?;
+        writer.write_u8(self.flags)?;
+        Ok(())
     }
 }

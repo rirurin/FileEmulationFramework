@@ -11,5 +11,8 @@ fileemu-utoc-stream-emulator = { path = "../fileemu-utoc-stream-emulator" }
 [dependencies.windows]
 version = "0.52"
 features = [
-    "Win32_Foundation"
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage",
+    "Win32_Storage_FileSystem"
 ]
