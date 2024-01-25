@@ -215,11 +215,26 @@ impl FStringSerializerBlockAlign for FString16 {
     }
 }
 
+// Rename to Hasher8 later
 pub struct Hasher;
 impl Hasher {
     pub fn get_cityhash64(bytes: &str) -> u64 {
         let to_hash = String::from(bytes).to_lowercase();
         cityhasher::hash(to_hash.as_bytes())
+    }
+}
+
+// TODO: Switch IoStoreObjectIndex to use Hasher16 as a base implementation
+pub struct Hasher16;
+impl Hasher16 {
+    pub fn get_cityhash64(bytes: &str) -> u64 {
+        let to_hash = String::from(bytes).to_lowercase();
+        // hash chars are sized according to if the platform supports wide characters, which is usually the case
+        let to_hash: Vec<u16> = to_hash.encode_utf16().collect();
+        // safety: Vec is contiguous, so a Vec<u8> of length `2 * n` will take the same memory as a Vec<u16> of len `n`
+        let to_hash = unsafe { std::slice::from_raw_parts(to_hash.as_ptr() as *const u8, to_hash.len() * 2) };
+        // verified: the strings are identical (no null terminator) when using FString16
+        cityhasher::hash(to_hash) // cityhash it
     }
 }
 
@@ -249,9 +264,3 @@ impl From<FMappedName> for u64 {
         value.0 as u64 | (value.1 as u64) << 0x20
     }
 }
-
-/* 
-pub trait Hasher;
-pub struct HasherUTF8;
-pub struct HasherUTF16;
-*/

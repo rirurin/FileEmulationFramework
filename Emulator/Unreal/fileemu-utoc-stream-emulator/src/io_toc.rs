@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+use crate::string::{Hasher, Hasher16};
 use std::{
     error::Error,
     io::{Seek, Write}
@@ -149,9 +150,10 @@ pub struct IoStoreTocHeaderType4 { // Unreal Engine 5.0+ (size: 0x90)
 }
 
 // IO CHUNK ID
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 #[repr(u8)]
 #[allow(dead_code)]
-enum IoChunkType4 {     
+pub enum IoChunkType4 {     
     Invalid = 0,
     InstallManifest,
     ExportBundleData,
@@ -162,12 +164,49 @@ enum IoChunkType4 {
     LoaderInitialLoadMeta,
     LoaderGlobalNames,
     LoaderGlobalNameHashes,
-    ContainerHeader // added in UE 4.26
+    ContainerHeader // added in UE 4.25+/4.26
 }
 
+impl From<u8> for IoChunkType4 {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => IoChunkType4::InstallManifest,
+            2 => IoChunkType4::ExportBundleData,
+            3 => IoChunkType4::BulkData,
+            4 => IoChunkType4::OptionalBulkData,
+            5 => IoChunkType4::MemoryMappedBulkData,
+            6 => IoChunkType4::LoaderGlobalMeta,
+            7 => IoChunkType4::LoaderInitialLoadMeta,
+            8 => IoChunkType4::LoaderGlobalNames,
+            9 => IoChunkType4::LoaderGlobalNameHashes,
+            10 => IoChunkType4::ContainerHeader,
+            _ => panic!("Invalid type {} for IoChunkType4", value)
+        }
+    }
+}
+
+impl From<IoChunkType4> for u8 {
+    fn from(value: IoChunkType4) -> Self {
+        match value {
+            IoChunkType4::Invalid => 0,
+            IoChunkType4::InstallManifest => 1,
+            IoChunkType4::ExportBundleData => 2,
+            IoChunkType4::BulkData => 3,
+            IoChunkType4::OptionalBulkData => 4,
+            IoChunkType4::MemoryMappedBulkData => 5,
+            IoChunkType4::LoaderGlobalMeta => 6,
+            IoChunkType4::LoaderInitialLoadMeta => 7,
+            IoChunkType4::LoaderGlobalNames => 8,
+            IoChunkType4::LoaderGlobalNameHashes => 9,
+            IoChunkType4::ContainerHeader => 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 #[repr(u8)]
 #[allow(dead_code)]
-enum IoChunkType5 {
+pub enum IoChunkType5 {
     Invalid = 0,
     ExportBundleData,
     BulkData,
@@ -184,28 +223,99 @@ enum IoChunkType5 {
     PackageResource // added in UE 5.2
 }
 
-#[repr(C)]
+impl From<u8> for IoChunkType5 {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => IoChunkType5::ExportBundleData,
+            2 => IoChunkType5::BulkData,
+            3 => IoChunkType5::OptionalBulkData,
+            4 => IoChunkType5::MemoryMappedBulkData,
+            5 => IoChunkType5::ScriptObjects,
+            6 => IoChunkType5::ContainerHeader,
+            7 => IoChunkType5::ExternalFile,
+            8 => IoChunkType5::ShaderCodeLibrary,
+            9 => IoChunkType5::ShaderCode,
+            10 => IoChunkType5::PackageStoreEntry,
+            11 => IoChunkType5::DerivedData,
+            12 => IoChunkType5::EditorDerivedData,
+            13 => IoChunkType5::PackageResource,
+            _ => panic!("Invalid type {} for IoChunkType4", value)
+        }
+    }
+}
+
+impl From<IoChunkType5> for u8 {
+    fn from(value: IoChunkType5) -> Self {
+        match value {
+            IoChunkType5::Invalid => 0,
+            IoChunkType5::ExportBundleData => 1,
+            IoChunkType5::BulkData => 2,
+            IoChunkType5::OptionalBulkData => 3,
+            IoChunkType5::MemoryMappedBulkData => 4,
+            IoChunkType5::ScriptObjects => 5,
+            IoChunkType5::ContainerHeader => 6,
+            IoChunkType5::ExternalFile => 7,
+            IoChunkType5::ShaderCodeLibrary => 8,
+            IoChunkType5::ShaderCode => 9,
+            IoChunkType5::PackageStoreEntry => 10,
+            IoChunkType5::DerivedData => 11,
+            IoChunkType5::EditorDerivedData => 12,
+            IoChunkType5::PackageResource => 13,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+#[repr(C)] // This is the same across all versions of IO Store UE that i'm aware of
 pub struct IoChunkId {
     id: [u8; 0xc]
 }
 
 impl IoChunkId {
+    pub fn new(path: &str, chunk_type: IoChunkType4) -> Self {
+        let mut id: [u8; 0xc] = [0; 0xc];
+        let chunk_id = Hasher16::get_cityhash64(path).to_ne_bytes(); // ChunkId
+        // NOTE: find a way to directly copy u64 into a u8 slice (probably will require unsafe)
+        for (i, v) in chunk_id.iter().enumerate() {
+            id[i] = *v;
+        }
+        let chunk_index = 0_u16.to_ne_bytes();
+        for (i, v) in chunk_index.iter().enumerate() {
+            id[i + 8] = *v;
+        }
+        id[11] = chunk_type.into(); // chunk type
+        Self { id }
+    }
 } 
 
 // IO OFFSET + LENGTH
-
+#[derive(Debug)]
 #[repr(C)]
 pub struct IoOffsetAndLength {
     data: [u8; 0xa]
 }
 
 impl IoOffsetAndLength {
-
+    pub fn new(offset: u32, length: u32) -> Self {
+        let mut data = [0; 0xa];
+        for (i, v) in offset.to_ne_bytes().iter().enumerate() {
+            data[i + 1] = *v;
+        }
+        for (i, v) in length.to_ne_bytes().iter().enumerate() {
+            data[i + 6] = *v;
+        }
+        Self {data}
+    }
+    /* 
+    pub fn new(offset: u64, length: u64) -> Result<Self, String> {
+    }
+    */
 }
 
 // (UE 5 ONLY) Perfect Hash
 
 // IO Compression Blocks
+#[derive(Debug)]
 #[repr(C)]
 pub struct IoStoreTocCompressedBlockEntry {
     data: [u8; 0xc] // 5 bytes offset, 3 bytes for size/uncompressed size, 1 byte for compression
@@ -213,7 +323,32 @@ pub struct IoStoreTocCompressedBlockEntry {
 }
 
 impl IoStoreTocCompressedBlockEntry {
-
+    pub fn new(offset: u32, length: u32) -> Self {
+        let data = [0; 0xc];
+        Self {data}
+    }
+    pub fn get_offset(&self) -> u32 {
+        u32::from_ne_bytes(self.data[1..5].try_into().unwrap())
+    }
+    pub fn get_size(&self) -> u32 {
+        let mut out = [0; 4];
+        /* */
+        for (i, v) in self.data[5..8].iter().enumerate() {
+            out[i + 1] = *v;
+        }
+        u32::from_ne_bytes(out)
+    }
+    /* 
+    // this likely won't need to fail since toc builder would've rejected file when creating offset + length
+    pub fn new(offset: u64, length: u64) -> Result<Self, String> {
+        // ...
+    }
+    */
+    /*
+    pub fn get_offset(&self) -> u64 {
+        // ...
+    }
+    */
 }
 
 // (usually, compression info and signature data would be included here, but we have no reason to
@@ -247,4 +382,22 @@ pub struct IoFileResource {
     directory_entries: Vec<IoDirectoryIndexEntry>,
     file_entries: Vec<IoFileIndexEntry>,
     strings: Vec<String>
+}
+
+// META (WIP)
+
+#[repr(C)]
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct IoStoreTocEntryMeta {
+    hash: [u8; 0x20],
+    flags: u8
+}
+
+impl IoStoreTocEntryMeta {
+    pub fn new() -> Self {
+        let hash = [0; 0x20];
+        let flags = 0;
+        Self { hash, flags }
+    }
 }

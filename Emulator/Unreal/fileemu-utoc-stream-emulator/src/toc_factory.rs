@@ -8,8 +8,8 @@ use std::{
     os::windows::fs::MetadataExt
 };
 use crate::{
-    io_toc::{IoChunkId, IoDirectoryIndexEntry, IoFileIndexEntry, IoStoreTocHeaderType3},
-    string::{FString32NoHash, FStringSerializer, FStringSerializerExpectedLength, Hasher}
+    io_toc::{IoChunkId, IoChunkType4, IoDirectoryIndexEntry, IoFileIndexEntry, IoStoreTocEntryMeta, IoStoreTocHeaderType3, IoStoreTocCompressedBlockEntry, IoOffsetAndLength},
+    string::{FString32NoHash, FStringSerializer, FStringSerializerExpectedLength, Hasher, Hasher16}
 };
 
 //
@@ -103,7 +103,8 @@ impl TocDirectory2 {
         replacee: Rc<TocFile2>, // like the "e" in bladee
         replacer: Rc<TocFile2> // file that'll take the place of replacee in the chain
     ) {
-        println!("REPLACE FILE IN {}: SWAP {} WITH {}", dir.name, replacee.name, replacer.name);
+        println!("REPLACE FILE IN {}: SWAP {} WITH {} (TODO)", dir.name, replacee.name, replacer.name);
+        // borked atm
         if prev_file.as_ref() != None {
             //*Rc::clone(prev_file.as_ref().unwrap()).next.borrow_mut() = Some(Rc::clone(&replacer));
         }
@@ -403,26 +404,40 @@ pub struct TocResolver {
     pub resolved_strings: u32,
     estimated_malloc_size: usize, // at least header in size
     compression_block_size: u32,
-    toc_name_hash: u64
+    memory_mapping_alignment: u32,
+    compression_block_alignment: u32,
+    toc_name_hash: u64,
+    pub project_name: String, // name that you gave your UE4 project
+    pub chunk_ids: Vec<IoChunkId>,
+    pub offsets_and_lengths: Vec<IoOffsetAndLength>,
+    pub compression_blocks: Vec<IoStoreTocCompressedBlockEntry>,
+    pub metas: Vec<IoStoreTocEntryMeta>,
 }
 
 impl TocResolver {
-    pub fn new() -> Self {
+    pub fn new(root_name: &str) -> Self {
         let directories: Vec<IoDirectoryIndexEntry> = vec![]; // The resulting directory list will be serialized as an FIoDirectoryIndexEntry
         let files: Vec<IoFileIndexEntry> = vec![]; // Our file list will be serialized as an FIoFileIndexEntry
         let strings: Vec<String> = vec![]; // Strings will be owned by a string pool where there'll be serialized into an FString array
         // Strings will be serialized as FString32NoHash
         let estimated_malloc_size = std::mem::size_of::<IoStoreTocHeaderType3>(); // number of bytes that we're expecting this to take up - IoStoreTocHeader is 0x90 bytes, so start with that
         let compression_block_size = 0x10000; // default for UE 4.27
+        let memory_mapping_alignment = 0x4000; // default for UE 4.27 (isn't saved in toc)
+        let compression_block_alignment = 0x800; // default for UE 4.27 (isn't saved in toc)
         // every file is virtually put on an alignment of [compression_block_size] (in reality, they're only aligned to nearest 16 bytes)
         // offset section defines where each file's data starts, while compress blocks section defines each compression block
         let toc_name_hash = Hasher::get_cityhash64("UnrealEsssentials_P"); // used for container id (is also the last file in partition)
         let resolved_directories = 0;
         let resolved_files = 0;
         let resolved_strings = 0;
+        let project_name = root_name.to_owned();
         Self { 
-            directories, files, strings, resolved_directories, resolved_files, 
-            resolved_strings, estimated_malloc_size, compression_block_size, toc_name_hash 
+            directories, files, strings, resolved_directories, resolved_files, resolved_strings, estimated_malloc_size, 
+            compression_block_size, memory_mapping_alignment, compression_block_alignment, toc_name_hash, project_name,
+            chunk_ids: vec![],
+            offsets_and_lengths: vec![],
+            compression_blocks: vec![],
+            metas: vec![]
         }
     }
 
@@ -490,10 +505,135 @@ impl TocResolver {
         values
     }
     pub fn flatten_toc_tree_2(&mut self, root: Rc<TocDirectory2>) {
-
+        let result = self.flatten_toc_tree_dir(Rc::clone(&root));
+        println!("{:?}", &result);
+        self.directories = result;
     }
-    pub fn create_chunk_id() {
-
+    fn flatten_toc_tree_dir(&mut self, node: Rc<TocDirectory2>) -> Vec<IoDirectoryIndexEntry> {
+        let mut values = vec![];
+        let mut flat_value = IoDirectoryIndexEntry {
+            name: self.get_string_index(&node.name),
+            first_child: u32::MAX,
+            next_sibling: u32::MAX,
+            first_file: u32::MAX
+        };
+        // Iterate through each file
+        // When we hit a file, we'll need to make it's chunk hash, length + offset and compression blocks
+        // also create the meta with a placeholder zero hash since I haven't checked how that's implemented yet
+        // this needs refactoring this is *ugly*
+        if TocDirectory2::has_files(Rc::clone(&node)) {
+            let mut curr_file = Rc::clone(node.first_file.borrow().as_ref().unwrap());
+            loop {
+                let mut flat_file = IoFileIndexEntry {
+                    name: self.get_string_index(&curr_file.name),
+                    next_file: u32::MAX,
+                    user_data: self.resolved_files
+                };
+                // travel upwards through parents to build path
+                let mut path_comps: Vec<String> = vec![];
+                let mut curr_parent = Rc::clone(&node);
+                loop {
+                    path_comps.insert(0, curr_parent.name.to_owned());
+                    match Rc::clone(&curr_parent).parent.borrow().upgrade() {
+                        Some(ip) => curr_parent = Rc::clone(&ip),
+                        None => break
+                    }
+                }
+                let filename_buf = PathBuf::from(&curr_file.name);
+                let path = path_comps.join("/") + "/" + filename_buf.file_stem().unwrap().to_str().unwrap();
+                println!("{} PATH: {}", &curr_file.name, &path);
+                // Get the appropriate chunk type based on file
+                // TODO: move this over to a trait method to account for different functionality between UE4 and UE5
+                let chunk_type = match PathBuf::from(&curr_file.name).extension() {
+                    Some(ext) => {
+                        match SUITABLE_FILE_EXTENSIONS.iter().position(|exist| *exist == ext) {
+                            Some(i) => {
+                                match i {
+                                    0 => IoChunkType4::ExportBundleData, //.uasset
+                                    1 => IoChunkType4::BulkData, // .ubulk
+                                    2 => IoChunkType4::OptionalBulkData, // .uptnl
+                                    _ => panic!("ERROR: Did not get a supported file extension. This should've been handled earlier")
+                                }
+                            },
+                            None => panic!("ERROR: Did not get a supported file extension. This should've been handled earlier")
+                        }
+                    },
+                    None => panic!("ERROR: Did not get a file extension. This should've been caught earlier)")
+                };
+                let generated_chunk_id = self.create_chunk_id(&path, chunk_type);
+                println!("Created chunk id from {}: {:?}", &path, generated_chunk_id);
+                self.chunk_ids.push(generated_chunk_id);
+                // Generate FIoOffsetAndLength
+                // TODO: Use u64, then check that base_length is smaller than 0xFF FF FF FF FF
+                let file_offset = self.compression_blocks.len() as u32 * self.compression_block_size;
+                let file_length = curr_file.file_size as u32;
+                let generated_offset_length = IoOffsetAndLength::new(file_offset, file_length);
+                println!("Created offset and length for {}: 0x{:X}, 0x{:X}", &path, file_offset, file_length);
+                self.offsets_and_lengths.push(generated_offset_length);
+                // Generate compression blocks
+                let compression_block_count = (file_length / self.compression_block_size) + 1;
+                let mut size_remaining = file_length;
+                for _ in 0..compression_block_count {
+                    let cmp_size = if size_remaining > self.compression_block_size {self.compression_block_size} else {size_remaining}; // cmp_size = decmp_size
+                    let offset = match self.compression_blocks.last() {
+                        Some(n) => {
+                            n.get_offset() + n.get_size()
+                        },
+                        None => 0
+                    };
+                    if size_remaining > self.compression_block_size {size_remaining -= self.compression_block_size}; // rust panics on overflow by default
+                }
+                //println!("AAAAAAAAAAAAAAAA Requires {} compression blocks", compression_block_count);
+                // Generate meta
+                self.resolved_files += 1;
+                match Rc::clone(&curr_file).next.borrow().as_ref() {
+                    Some(next) => {
+                        flat_file.next_file = self.resolved_files;
+                        self.files.push(flat_file);
+                        curr_file = Rc::clone(next)
+                    },
+                    None => {
+                        self.files.push(flat_file);
+                        break
+                    }
+                }
+            }
+        }
+        // Iterate through inner directories
+        self.resolved_directories += 1;
+        println!("flatten(): {}, id {}", &node.name, self.resolved_directories - 1);
+        if TocDirectory2::has_children(Rc::clone(&node)) {
+            flat_value.first_child = self.resolved_directories;
+            values.push(flat_value);
+            let mut curr_child = Rc::clone(node.first_child.borrow().as_ref().unwrap());
+            loop {
+                let mut children = self.flatten_toc_tree_dir(Rc::clone(&curr_child));
+                match Rc::clone(&curr_child).next_sibling.borrow().as_ref() { // get the next child (if they exist)
+                    Some(next) => {
+                        children[0].next_sibling = self.resolved_directories;
+                        values.extend(children);
+                        curr_child = Rc::clone(next);
+                    },
+                    None => {
+                        values.extend(children);
+                        break
+                    }
+                }
+            }
+        } else {
+            values.push(flat_value);
+        }
+        values
+    }
+    pub fn create_chunk_id(&self, file_path: &str, chunk_type: IoChunkType4) -> IoChunkId {
+        // replace [BaseDirectory]/Content with /Game/
+        let path_to_replace = self.project_name.clone() + "/Content";
+        if let Some((_, suffix)) = file_path.to_owned().split_once(&path_to_replace) {
+            let path_to_hash = String::from("/Game") + suffix;
+            IoChunkId::new(&path_to_hash, chunk_type)
+        } else {
+            panic!("Path \"{}\" is missing root containing project name + content. Path components were not handled properly", file_path);
+        }
     }
     pub fn create_chunk_partition_blocks() {
         // Consisting of the file location and size, and one or more compression blocks required to hold the file (alignment 0x10)
@@ -501,13 +641,16 @@ impl TocResolver {
     pub fn create_file_meta() {
         // As a placeholder, set the hash to 0 (I haven't yet checked to see how meta hash is created)
     }
+    pub fn build_container_summary(&mut self) {
+
+    }
 }
 
 // TODO: Set the mount point further up in mods where the file structure doesn't diverge at root
 // TODO: Pass version param (probably as trait) to customize how TOC is produced depenending on the target version
 // TODO: Handle creating multiple partitions (not important but would help make this more feature complete)
 pub fn build_table_of_contents(root: &mut TocDirectory) {
-    let mut resolver = TocResolver::new();
+    let mut resolver = TocResolver::new("a");
     // flatten our tree into a list by pre-order traversal
     resolver.flatten_toc_tree(root);
     // Get DirectoryIndexSize = MountPoint + Directory Entries + File Entries + Strings
@@ -517,6 +660,7 @@ pub fn build_table_of_contents(root: &mut TocDirectory) {
     let mut string_index_bytes = 0;
     resolver.strings.iter().for_each(|name| string_index_bytes += FString32NoHash::get_expected_length(name));
     println!("Mount point {}, dir index: {}, file index: {}, strings {}", mount_point_bytes, directory_index_bytes, file_index_bytes, string_index_bytes);
+    resolver.build_container_summary(); // last file in list
     // From there, hash file names for FIoChunkId entries
     /* 
     resolver.files.iter().for_each(|f| {
@@ -532,9 +676,9 @@ pub fn build_table_of_contents(root: &mut TocDirectory) {
 // TODO: Pass version param (probably as trait) to customize how TOC is produced depenending on the target version
 // TODO: Handle creating multiple partitions (not important but would help make this more feature complete)
 pub fn build_table_of_contents2(root: Rc<TocDirectory2>) {
-    println!("TODO: BUILD TABLE OF CONTENTS");
+    println!("BUILD TABLE OF CONTENTS FOR UnrealEssentials_P.utoc");
     // flatten our tree into a list by pre-order traversal
-    let mut resolver = TocResolver::new();
+    let mut resolver = TocResolver::new(&root.name);
     resolver.flatten_toc_tree_2(Rc::clone(&root));
     // Get DirectoryIndexSize = MountPoint + Directory Entries + File Entries + Strings
     let mount_point_bytes = FString32NoHash::get_expected_length(MOUNT_POINT);
@@ -542,6 +686,6 @@ pub fn build_table_of_contents2(root: Rc<TocDirectory2>) {
     let file_index_bytes = resolver.directories.len() * std::mem::size_of::<IoFileIndexEntry>();
     let mut string_index_bytes = 0;
     resolver.strings.iter().for_each(|name| string_index_bytes += FString32NoHash::get_expected_length(name));
-    println!("Mount point {}, dir index: {}, file index: {}, strings {}", mount_point_bytes, directory_index_bytes, file_index_bytes, string_index_bytes);
+    println!("Mount point {}, dir size: {}, file size: {}, strings {}", mount_point_bytes, directory_index_bytes, file_index_bytes, string_index_bytes);
 
 }

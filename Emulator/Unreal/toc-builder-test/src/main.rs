@@ -20,5 +20,5 @@ fn main() {
 
     fileemu_utoc_stream_emulator::add_from_folders(&test_mod_1);
     fileemu_utoc_stream_emulator::add_from_folders(&test_mod_2);
-    fileemu_utoc_stream_emulator::print_toc_contents_debug();
+    fileemu_utoc_stream_emulator::build_table_of_contents(HANDLE::default(), &unreal_essentials_toc);
 }
