@@ -71,6 +71,8 @@ impl fmt::Display for UnrealStringError {
 }
 impl Error for UnrealStringError {}
 
+pub const NAME_HASH_ALGORITHM: u64 = 0xC1640000; // FNameHash::AlgorithmId
+
 #[allow(dead_code)]
 #[derive(Debug)]
 // Used in a couple places, mostly in PAK package headers (see FolderName, SavedByEngineVersion in FPackageFilePackageSummary). 
@@ -211,7 +213,7 @@ impl FStringSerializerBlockAlign for FString16 {
     }
     fn to_buffer_alignment<W: Write + Seek, E: byteorder::ByteOrder>(writer: &mut W) {
         to_buffer_alignment_super::<Self, W, E>(writer);
-        writer.write_u64::<E>(0xC1640000 as u64); // FNameHash::AlgorithmId
+        writer.write_u64::<E>(NAME_HASH_ALGORITHM);
     }
 }
 

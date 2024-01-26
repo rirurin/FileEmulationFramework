@@ -4,11 +4,15 @@ use std::{
     path::{Path, PathBuf},
     fs, fs::{DirEntry, File},
     io, io::{Cursor, Read, Seek, SeekFrom, Write},
+    os::windows::fs::MetadataExt,
     rc::{Rc, Weak},
-    os::windows::fs::MetadataExt
+    time::Instant,
 };
 use crate::{
-    io_toc::{IoChunkId, IoChunkType4, IoDirectoryIndexEntry, IoFileIndexEntry, IoStringPool, IoStoreTocEntryMeta, IoStoreTocHeaderType3, IoStoreTocCompressedBlockEntry, IoOffsetAndLength},
+    io_toc::{
+        ContainerHeader, ContainerHeaderPackage, IoChunkId, IoChunkType4, IoDirectoryIndexEntry, IoFileIndexEntry, 
+        IoStringPool, IoStoreTocEntryMeta, IoStoreTocHeaderType3, IoStoreTocCompressedBlockEntry, IoOffsetAndLength
+    },
     string::{FString32NoHash, FStringSerializer, FStringSerializerExpectedLength, Hasher, Hasher16}
 };
 use windows::Win32::{
@@ -330,7 +334,7 @@ impl TocResolver {
         let compression_block_alignment = 0x800; // default for UE 4.27 (isn't saved in toc)
         // every file is virtually put on an alignment of [compression_block_size] (in reality, they're only aligned to nearest 16 bytes)
         // offset section defines where each file's data starts, while compress blocks section defines each compression block
-        let toc_name_hash = Hasher16::get_cityhash64("UnrealEsssentials_P"); // used for container id (is also the last file in partition) (verified)
+        let toc_name_hash = Hasher16::get_cityhash64("UnrealEssentials_P"); // used for container id (is also the last file in partition) (verified)
         let resolved_directories = 0;
         let resolved_files = 0;
         let resolved_strings = 0;
@@ -467,14 +471,13 @@ impl TocResolver {
             panic!("Path \"{}\" is missing root containing project name + content. Path components were not handled properly", file_path);
         }
     }
-    pub fn build_container_summary(&mut self) {
-
-    }
 
     pub fn serialize(&mut self, handle: HANDLE, toc_path: &str, part_path: &str) {
+        type CV = Cursor<Vec<u8>>;
+        type EN = byteorder::NativeEndian;
         //println!("Create TOC for {}, partition at {}", toc_path, part_path);
-        let mut toc_storage: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        let mut cas_storage: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        let mut toc_storage: CV = Cursor::new(vec![]);
+        let mut cas_storage: CV = Cursor::new(vec![]);
         let cas_writer = PartitionSerializer::new(self.compression_block_alignment);
         // Get DirectoryIndexSize = MountPoint + Directory Entries + File Entries + Strings
         let mount_point_bytes = FString32NoHash::get_expected_length(MOUNT_POINT);
@@ -486,6 +489,7 @@ impl TocResolver {
         let dir_size = mount_point_bytes + directory_index_bytes as u64 + file_index_bytes as u64 + string_index_bytes;
         println!("Mount point {}, dir size: {}, file size: {}, strings {}, total {}", mount_point_bytes, directory_index_bytes, file_index_bytes, string_index_bytes, dir_size);
         // Write our partition file
+        let mut container_header = ContainerHeader::new(self.toc_name_hash);
         for (i, v) in self.files.iter().enumerate() {
             match fs::read(&v.os_path) {
                 Ok(f) => {
@@ -494,7 +498,6 @@ impl TocResolver {
                     let curr_file = &self.files[i];
                     let file_offset = self.compression_blocks.len() as u64 * self.compression_block_size as u64;
                     let file_length = f.len() as u64;
-                    //let file_length = curr_file.file_size as u32;
                     let generated_offset_length = IoOffsetAndLength::new(file_offset, file_length);
                     println!("Created offset and length for {}: 0x{:X}, 0x{:X}", &curr_file.name, file_offset, file_length);
                     self.offsets_and_lengths.push(generated_offset_length);
@@ -510,17 +513,36 @@ impl TocResolver {
                         if size_remaining > self.compression_block_size {size_remaining -= self.compression_block_size}; // rust panics on overflow by default
                     }
                     // Generate meta
-                    self.metas.push(IoStoreTocEntryMeta::new()); // PLACEHOLDER
+                    // meta is a SHA1 hash of the file's contents
+                    self.metas.push(IoStoreTocEntryMeta::new(&f)); // PLACEHOLDER
+
+                    // Generate container header package entry
+                    let mut f_cursor = Cursor::new(f); // move stream to cursor for from_header_package
+                    if self.chunk_ids[i].get_type() == IoChunkType4::ExportBundleData {
+                        container_header.packages.push(ContainerHeaderPackage::from_header_package::<CV, EN>(
+                            &mut f_cursor, 
+                            self.chunk_ids[i].get_raw_hash(),
+                            file_length)
+                        );
+                    }
+                    let f = f_cursor.into_inner(); // move stream back into f
                     // TODO: read IO Store asset header if it's an ExportBundleData to read as StoreEntries in container summary
-                    PartitionSerializer::to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&f, &mut cas_storage);
-                    cas_writer.to_buffer_alignment::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&mut cas_storage);
+                    PartitionSerializer::to_buffer::<CV, EN>(&f, &mut cas_storage);
+                    cas_writer.to_buffer_alignment::<CV, EN>(&mut cas_storage);
                     println!("new cursor position: 0x{:X}", cas_storage.position());
                 },
                 Err(e) => panic!("ERROR: Could not read file {}: reason {}", &v.os_path, e.to_string())
             }
         }
-        cas_storage.seek(SeekFrom::Current(-1));
-        cas_storage.write(&[0x0]); // write byte at end to extend vec
+        let container_position = cas_storage.position();
+        let container_header = container_header.to_buffer::<CV, EN>(&mut cas_storage).unwrap(); // write our container header in the buffer
+        self.chunk_ids.push(IoChunkId::new_from_hash(self.toc_name_hash, IoChunkType4::ContainerHeader)); // header chunk id
+        let header_offset = self.compression_blocks.len() as u64 * self.compression_block_size as u64; 
+        self.offsets_and_lengths.push(IoOffsetAndLength::new(header_offset, container_header.len() as u64)); // header offset + length
+        // header compress blocks (use single block for now, make sure to support multiple blocks later)
+        self.compression_blocks.push(IoStoreTocCompressedBlockEntry::new(container_position, container_header.len() as u32));
+        self.metas.push(IoStoreTocEntryMeta::new(&container_header));
+
         let cursor_finish = cas_storage.position();
         // partition can be written by std::fs - FileEmulationFramework only has the open file handle for toc
         match fs::write(part_path, &cas_storage.into_inner()) {
@@ -530,34 +552,21 @@ impl TocResolver {
         // Write our TOC
         let toc_header = IoStoreTocHeaderType3::new(
             self.toc_name_hash, 
-            self.files.len() as u32,
+            self.files.len() as u32 + 1, // + 1 for container header
             self.compression_blocks.len() as u32,
             self.compression_block_size,
             dir_size as u32
         );
         // FIoStoreTocHeader
-        toc_header.to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&mut toc_storage).unwrap();
-        // FIoChunkId
-        for i in &self.chunk_ids {
-            i.to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&mut toc_storage).unwrap();
-        }
-        // FIoOffsetAndLength
-        for i in &self.offsets_and_lengths {
-            i.to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&mut toc_storage).unwrap();
-        }
-        // FIoStoreTocCompressedBlockEntry
-        for i in &self.compression_blocks {
-            i.to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&mut toc_storage).unwrap();
-        }
-        // Mount Point
-        FString32NoHash::to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(MOUNT_POINT, &mut toc_storage).unwrap();
-        IoDirectoryIndexEntry::list_to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&self.directories, &mut toc_storage).unwrap(); // FIoDirectoryIndexEntry
-        IoFileIndexEntry::list_to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&self.files, &mut toc_storage).unwrap(); // FIoFileIndexEntry
-        IoStringPool::list_to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&self.strings, &mut toc_storage).unwrap(); // FIoStringIndexEntry
-        // FIoStoreTocEntryMeta
-        for i in &self.metas {
-            i.to_buffer::<Cursor<Vec<u8>>, byteorder::NativeEndian>(&mut toc_storage).unwrap();
-        }
+        toc_header.to_buffer::                          <CV, EN>(&mut toc_storage).unwrap(); // FIoStoreTocHeader
+        IoChunkId::list_to_buffer::                     <CV, EN>(&self.chunk_ids, &mut toc_storage).unwrap(); // FIoChunkId
+        IoOffsetAndLength::list_to_buffer::             <CV, EN>(&self.offsets_and_lengths, &mut toc_storage).unwrap(); // FIoOffsetAndLength
+        IoStoreTocCompressedBlockEntry::list_to_buffer::<CV, EN>(&self.compression_blocks, &mut toc_storage).unwrap(); // FIoStoreTocCompressedBlockEntry
+        FString32NoHash::to_buffer::                    <CV, EN>(MOUNT_POINT, &mut toc_storage).unwrap(); // Mount Point
+        IoDirectoryIndexEntry::list_to_buffer::         <CV, EN>(&self.directories, &mut toc_storage).unwrap(); // FIoDirectoryIndexEntry
+        IoFileIndexEntry::list_to_buffer::              <CV, EN>(&self.files, &mut toc_storage).unwrap(); // FIoFileIndexEntry
+        IoStringPool::list_to_buffer::                  <CV, EN>(&self.strings, &mut toc_storage).unwrap(); // FIoStringIndexEntry
+        IoStoreTocEntryMeta::list_to_buffer::           <CV, EN>(&self.metas, &mut toc_storage).unwrap(); // FIoStoreTocEntryMeta
         let toc_length = toc_storage.position();
         // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
         // https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/Storage/FileSystem/fn.WriteFile.html
@@ -590,9 +599,16 @@ impl TocResolver {
 pub fn build_table_of_contents2(handle: HANDLE, root: Rc<TocDirectory2>, toc_path: &str, part_path: &str) {
     println!("BUILD TABLE OF CONTENTS FOR UnrealEssentials_P.utoc");
     // flatten our tree into a list by pre-order traversal
+    let toc_time = Instant::now();
+    let mut flatten_time = 0;
+    let mut serialize_time = 0;
     let mut resolver = TocResolver::new(&root.name);
     resolver.flatten_toc_tree_2(Rc::clone(&root));
+    flatten_time = toc_time.elapsed().as_micros();
     resolver.serialize(handle, toc_path, part_path);
+    serialize_time = toc_time.elapsed().as_micros() - flatten_time;
+    println!("Flatten Time: {} ms", flatten_time as f64 / 1000f64);
+    println!("Serialize Time: {} ms", serialize_time as f64 / 1000f64);
 
 }
 

@@ -21,7 +21,7 @@ use crate::{
 use std::{
     error::Error,
     fmt,
-    io::{Cursor, Seek, SeekFrom, Write}
+    io::{Cursor, Read, Seek, SeekFrom, Write}
 };
 // IoStoreObjectIndex is a 64 bit value consisting of a hash of a target string for the lower 62 bits and an object type for the highest 2
 // expect for Empty which represents a null value and Export which contains an index to another item on the export tree
@@ -35,6 +35,18 @@ pub enum IoStoreObjectIndex {
 }
 
 impl IoStoreObjectIndex {
+    pub fn from_buffer<R: Read + Seek, E: byteorder::ByteOrder>(&self, reader: &mut R) -> IoStoreObjectIndex {
+        let raw_value = reader.read_u64::<E>().unwrap();
+        let obj_type = raw_value & (3 << 62);
+        match obj_type {
+            0 => IoStoreObjectIndex::Export(0), // can't derive string name from hash, will likely need to separate this off to another type for container header building
+            1 => IoStoreObjectIndex::ScriptImport(String::new()),
+            2 => IoStoreObjectIndex::PackageImport(String::new()),
+            3 => IoStoreObjectIndex::Empty,
+            _ => panic!("Invalid obj type {}", obj_type),
+        }
+    }
+    // TOOO: upgrade trait bounds to Write + Seek
     pub fn to_buffer<W: Write, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
         match self {
             Self::Export(i) => writer.write_u64::<E>(*i as u64)?,
@@ -83,12 +95,8 @@ impl ObjectImport {
 }
 
 // Io Store Asset Header
-pub trait FPackageSummary {
-    // 
-}
-
 #[repr(C)]
-pub struct FPackageSummary1 { // Unreal Engine 4.25 (Scarlet Nexus)
+pub struct FPackageSummary1 { // Unreal Engine 4.25
     package_flags: u32,
     name_map_offset: i32,
     import_map_offset: i32,
@@ -101,15 +109,11 @@ pub struct FPackageSummary1 { // Unreal Engine 4.25 (Scarlet Nexus)
     padding: i32
 }
 
-impl FPackageSummary for FPackageSummary1 {
-    // ...
-}
 
-/* 
 #[repr(C)]
-pub struct FPackageSummary2 { // Unreal Engine 4.26-4.27 (P3RE, Hi-Fi RUSH, FF7R)
-    name: MappedName,     
-    source_name: MappedName,
+pub struct FPackageSummary2 { // Unreal Engine 4.25+, 4.26-4.27 (Scarlet Nexus, P3RE, Hi-Fi RUSH, FF7R)
+    name: FMappedName,     
+    source_name: FMappedName,
     package_flags: u32,
     cooked_header_size: u32,
     name_map_names_offset: i32,
@@ -123,10 +127,38 @@ pub struct FPackageSummary2 { // Unreal Engine 4.26-4.27 (P3RE, Hi-Fi RUSH, FF7R
     graph_data_size: i32
 }
 
-impl FPackageSummary for FPackageSummary2 {
-    // ...
+impl FPackageSummary2 {
+    pub fn from_buffer<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R) -> Self {
+        let name = reader.read_u64::<E>().unwrap().into();
+        let source_name = reader.read_u64::<E>().unwrap().into();
+        let package_flags = reader.read_u32::<E>().unwrap();
+        let cooked_header_size = reader.read_u32::<E>().unwrap();
+        let name_map_names_offset = reader.read_i32::<E>().unwrap();
+        let name_map_names_size = reader.read_i32::<E>().unwrap();
+        let name_map_hashes_offset = reader.read_i32::<E>().unwrap();
+        let name_map_hashes_size = reader.read_i32::<E>().unwrap();
+        let import_map_offset = reader.read_i32::<E>().unwrap();
+        let export_map_offset = reader.read_i32::<E>().unwrap();
+        let export_bundles_offset = reader.read_i32::<E>().unwrap();
+        let graph_data_offset = reader.read_i32::<E>().unwrap();
+        let graph_data_size = reader.read_i32::<E>().unwrap();
+        Self {
+            name,
+            source_name,
+            package_flags,
+            cooked_header_size,
+            name_map_names_offset,
+            name_map_names_size,
+            name_map_hashes_offset,
+            name_map_hashes_size,
+            import_map_offset,
+            export_map_offset,
+            export_bundles_offset,
+            graph_data_offset,
+            graph_data_size,
+        }
+    }
 }
-*/
 
 pub const UASSET_MAGIC: u32 = 0x9E2A83C1;
 
@@ -458,3 +490,36 @@ impl ExportBundleHeader for ExportBundleHeader5 {
 
 }
 */
+
+pub struct FGraphExternalArc {
+    from_export_bundle_index: u32,
+    to_export_bundle_index: u32
+}
+
+impl FGraphExternalArc {
+    fn from_buffer<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R) -> Self {
+        let from_export_bundle_index = reader.read_u32::<E>().unwrap();
+        let to_export_bundle_index = reader.read_u32::<E>().unwrap();
+        Self { from_export_bundle_index, to_export_bundle_index }
+    }
+}
+
+pub struct FGraphPackage {
+    pub imported_package_id: u64, // hashed
+    external_arcs: Vec<FGraphExternalArc>
+}
+
+impl FGraphPackage {
+    pub fn from_buffer<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R) -> Self {
+        let imported_package_id = reader.read_u64::<E>().unwrap();
+        let external_arc_count = reader.read_u32::<E>().unwrap();
+        let mut external_arcs = Vec::with_capacity(external_arc_count as usize);
+        for _ in 0..external_arc_count {
+            external_arcs.push(FGraphExternalArc::from_buffer::<R, E>(reader));
+        }
+        Self {
+            imported_package_id,
+            external_arcs
+        }
+    }
+}

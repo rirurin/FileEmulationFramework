@@ -10,6 +10,7 @@ bitflags = "2.4"
 byteorder = "1"
 cityhasher = "0.1"
 libc = "0.2"
+sha1 = "0.10"
 
 [dependencies.windows]
 version = "0.52"

@@ -31,6 +31,9 @@ fn main() {
     // open TOC file handle
     let toc_filename_win32 = unreal_essentials_toc.clone() + "\0";
     let start_making_toc = Instant::now();
+    let mut add_from_first_folder = 0;
+    let mut add_from_second_folder = 0;
+    let mut build_toc = 0;
     unsafe {
         // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
         // https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/Storage/FileSystem/fn.CreateFileA.html
@@ -46,12 +49,18 @@ fn main() {
             Ok(handle) => {
                 println!("Got TOC handle!");
                 fileemu_utoc_stream_emulator::add_from_folders(&test_mod_1);
+                add_from_first_folder = start_making_toc.elapsed().as_micros();
                 fileemu_utoc_stream_emulator::add_from_folders(&test_mod_2);
+                add_from_second_folder = start_making_toc.elapsed().as_micros() - add_from_first_folder;
                 fileemu_utoc_stream_emulator::build_table_of_contents(handle, &unreal_essentials_toc, &unreal_essentials_partition);
+                build_toc = start_making_toc.elapsed().as_micros() - add_from_second_folder;
             }
             Err(e) => println!("Error occurred trying to open file: {}", e.to_string())
         }
     }
-    // Damn it's slow (25 ms to merge 6 files) this is not the Reloaded3 grindset
-    println!("Created Unreal Essentials TOC in {} ms", start_making_toc.elapsed().as_millis());
+    println!("Added files from first mod in {} ms", add_from_first_folder as f64 / 1000f64);
+    println!("Added files from second mod in {} ms", add_from_second_folder as f64 / 1000f64);
+    println!("Built Table of Contents in {} ms", build_toc as f64 / 1000f64); // This section is slow...
+    println!("Total: {} ms", (add_from_first_folder + add_from_second_folder + build_toc) as f64 / 1000f64);
+
 }
