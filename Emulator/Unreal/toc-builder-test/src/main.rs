@@ -24,7 +24,7 @@ fn main() {
     println!("Using Reloaded mods directory at {}", r3_mod_path);
     // get our first test mods, convert to byte*
     let test_mod_1 = r3_mod_path.clone() + "/uetest.loosefiletest1";
-    let test_mod_2 = r3_mod_path.clone() + "/uetest.loosefiletest2";
+    //let test_mod_2 = r3_mod_path.clone() + "/uetest.loosefiletest2";
     let unreal_essentials_toc = r3_mod_path.clone() + "/UnrealEssentials/Unreal/UnrealEssentials_P.utoc";
     let unreal_essentials_partition = r3_mod_path.clone() + "/UnrealEssentials/Unreal/UnrealEssentials_P.ucas";
 
@@ -50,8 +50,8 @@ fn main() {
                 println!("Got TOC handle!");
                 fileemu_utoc_stream_emulator::add_from_folders(&test_mod_1);
                 add_from_first_folder = start_making_toc.elapsed().as_micros();
-                fileemu_utoc_stream_emulator::add_from_folders(&test_mod_2);
-                add_from_second_folder = start_making_toc.elapsed().as_micros() - add_from_first_folder;
+                //fileemu_utoc_stream_emulator::add_from_folders(&test_mod_2);
+                //add_from_second_folder = start_making_toc.elapsed().as_micros() - add_from_first_folder;
                 fileemu_utoc_stream_emulator::build_table_of_contents(handle, &unreal_essentials_toc, &unreal_essentials_partition);
                 build_toc = start_making_toc.elapsed().as_micros() - add_from_second_folder;
             }

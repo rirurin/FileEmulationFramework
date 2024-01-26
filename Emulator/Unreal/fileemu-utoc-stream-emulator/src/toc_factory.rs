@@ -479,15 +479,13 @@ impl TocResolver {
         let mut toc_storage: CV = Cursor::new(vec![]);
         let mut cas_storage: CV = Cursor::new(vec![]);
         let cas_writer = PartitionSerializer::new(self.compression_block_alignment);
-        // Get DirectoryIndexSize = MountPoint + Directory Entries + File Entries + Strings
-        let mount_point_bytes = FString32NoHash::get_expected_length(MOUNT_POINT);
+        // Get DirectoryIndexSize = Directory Entries + File Entries + Strings
         let directory_index_bytes = self.directories.len() * std::mem::size_of::<IoDirectoryIndexEntry>();
-        //let file_index_bytes = resolver.directories.len() * std::mem::size_of::<IoFileIndexEntry>();
-        let file_index_bytes = self.directories.len() * crate::io_toc::IO_FILE_INDEX_ENTRY_SERIALIZED_SIZE;
+        let file_index_bytes = self.files.len() * crate::io_toc::IO_FILE_INDEX_ENTRY_SERIALIZED_SIZE;
         let mut string_index_bytes = 0;
         self.strings.iter().for_each(|name| string_index_bytes += FString32NoHash::get_expected_length(name));
-        let dir_size = mount_point_bytes + directory_index_bytes as u64 + file_index_bytes as u64 + string_index_bytes;
-        println!("Mount point {}, dir size: {}, file size: {}, strings {}, total {}", mount_point_bytes, directory_index_bytes, file_index_bytes, string_index_bytes, dir_size);
+        let dir_size = directory_index_bytes as u64 + file_index_bytes as u64 + string_index_bytes + 12; // include dir count, entry count and string count (4 bytes each)
+        println!("dir size: {}, file size: {}, strings {}, total {}", directory_index_bytes, file_index_bytes, string_index_bytes, dir_size);
         // Write our partition file
         let mut container_header = ContainerHeader::new(self.toc_name_hash);
         for (i, v) in self.files.iter().enumerate() {
@@ -547,7 +545,7 @@ impl TocResolver {
         // partition can be written by std::fs - FileEmulationFramework only has the open file handle for toc
         match fs::write(part_path, &cas_storage.into_inner()) {
             Ok(_) => println!("Wrote 0x{:X} bytes into {}", cursor_finish, part_path),
-            Err(e) => println!("ERROR: Couldn't write to file {} reason: {}", part_path, e.to_string())
+            Err(e) => println!("ERROR: Couldn't write to partition file {} reason: {}", part_path, e.to_string())
         };
         // Write our TOC
         let toc_header = IoStoreTocHeaderType3::new(
@@ -570,7 +568,8 @@ impl TocResolver {
         let toc_length = toc_storage.position();
         // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
         // https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/Storage/FileSystem/fn.WriteFile.html
-        // Safety: FileEmulationFramework opened the handle (NtCreateFileImpl in FileAccessServer.cs)
+        // TODO: figure out how to hook this up to FileEmulationFramework properly
+        // This won't currently work when run through Reloaded, but does work with toc-builder-test
         let toc_inner = toc_storage.into_inner();
         let result = unsafe {
             FileSystem::WriteFile(
@@ -582,7 +581,7 @@ impl TocResolver {
         };
         match result {
             Ok(_) => println!("Wrote 0x{:X} bytes into {}", toc_length, toc_path),
-            Err(e) => println!("ERROR: Couldn't write to file {} reason: {}", toc_path, e.to_string())
+            Err(e) => println!("ERROR: Couldn't write to TOC file {} reason: {}", toc_path, e.to_string())
         }
         /* Use NT file handle + Win32 write instead of std::fs
         match fs::write(toc_path, &toc_storage.into_inner()) {

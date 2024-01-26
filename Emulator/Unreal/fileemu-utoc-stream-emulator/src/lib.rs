@@ -34,13 +34,15 @@ pub mod toc_factory; // TOC creator
 pub mod partition; // Parition builder
 pub mod reader; // stream reader
 pub mod string; // common Unreal types
+pub mod serialize;
 
 // Constant strings
 pub const TOC_EXTENSION:                    &'static str = ".utoc";
 pub const PARTITION_EXTENSION:              &'static str = ".ucas";
 pub const FILE_EMULATION_FRAMEWORK_FOLDER:  &'static str = "FEmulator";
 pub const EMULATOR_NAME:                    &'static str = "UTOC";
-pub const TARGET_TOC:                       &'static str = "UnrealEssentials_P.utoc";
+pub const TOC_NAME:                         &'static str = "UnrealEssentials_P";
+pub const TARGET_TOC:                         &'static str = "UnrealEssentials_P.utoc";
 // Root TOC directory (needs to be global)
 //pub static mut ROOT_DIRECTORY: Option<TocDirectory> = None;
 pub static mut ROOT_DIRECTORY: Option<Rc<TocDirectory2>> = None;
@@ -74,9 +76,10 @@ pub fn add_from_folders(mod_path: &str) {
 #[allow(non_snake_case)]
 // haiiii Reloaded!!!! :3
 pub unsafe extern "C" fn BuildTableOfContents(handle: HANDLE, srcDatPath: *const c_char, outputPath: *const c_char, route: *const c_char) -> bool {
-    let src_data_path_slice = CStr::from_ptr(srcDatPath).to_str().unwrap();
-    let output_data_path_slice = CStr::from_ptr(srcDatPath).to_str().unwrap();
-    build_table_of_contents(handle, &src_data_path_slice, &output_data_path_slice)
+    let toc_file_location_ffi = CStr::from_ptr(srcDatPath).to_str().unwrap(); // [mod_file_path]/[file_emu_folder]/UnrealEssentials_P.utoc
+    let cas_file_location = toc_file_location_ffi.strip_suffix(".utoc").unwrap().to_owned() + PARTITION_EXTENSION;
+    println!("TOC FILE LOCATION: {}, CAS FILE LOCATION: {}", toc_file_location_ffi, cas_file_location);
+    build_table_of_contents(handle, toc_file_location_ffi, &cas_file_location)
 }
 
 pub fn build_table_of_contents(handle: HANDLE, toc_path: &str, part_path: &str) -> bool {

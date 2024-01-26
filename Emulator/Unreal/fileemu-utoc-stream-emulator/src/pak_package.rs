@@ -514,3 +514,8 @@ impl FGraphPackage {
 // GlobalImportIndex - IoStoreObjectIndex
 // ObjectFlags - flags
 // FilterFlags - ??
+
+// Serialized size: 339 bytes
+pub struct GeneratedDataFromIoStore {
+
+}

@@ -69,10 +69,7 @@ bitflags! {
 
 // IO STORE HEADER
 
-pub const IO_STORE_TOC_MAGIC: &[u8] = b"-==--==--==--==-"; // const stored as static string slice
-                                                           // since std::convert::TryInto is not
-                                                           // const
-pub const IO_STORE_TOC_MAGIC2: [u8; 0x10] = *b"-==--==--==--==-";
+pub const IO_STORE_TOC_MAGIC: [u8; 0x10] = *b"-==--==--==--==-";
 
 pub enum IoStoreToc {
     Initial(IoStoreTocHeaderType1),
@@ -108,7 +105,7 @@ pub struct IoStoreTocHeaderType1 { // Unreal Engine 4.25 (size: 0x80) (unverifie
 
 impl IoStoreTocHeaderType1 {
     fn new<N: AsRef<str>>(name: N, entries: u32) -> IoStoreTocHeaderType1 {
-        let toc_magic: [u8; 0x10] = IO_STORE_TOC_MAGIC.try_into().unwrap();
+        let toc_magic: [u8; 0x10] = IO_STORE_TOC_MAGIC;
         let toc_header_size = std::mem::size_of::<IoStoreTocHeaderType1>() as u32;
         let toc_entry_count = entries;
         let toc_entry_size = 0;
@@ -164,14 +161,14 @@ pub struct IoStoreTocHeaderType3 { // Unreal Engine 4.27 (size: 0x90)
 impl IoStoreTocHeaderType3 {
     pub fn new(container_id: u64, entries: u32, compressed_blocks: u32, compression_block_size: u32, dir_index_size: u32) -> Self {
         Self {
-            toc_magic: IO_STORE_TOC_MAGIC2,
+            toc_magic: IO_STORE_TOC_MAGIC,
             version: IoStoreTocVersion::PartitionSize,
             toc_header_size: std::mem::size_of::<IoStoreTocHeaderType3>() as u32,
             toc_entry_count: entries,
             toc_compressed_block_entry_count: compressed_blocks,
             toc_compressed_block_entry_size: std::mem::size_of::<IoStoreTocCompressedBlockEntry>() as u32, // for sanity checking
             compression_method_name_count: 0,
-            compression_method_name_length: 0,
+            compression_method_name_length: 32,
             compression_block_size,
             directory_index_size: dir_index_size,
             partition_count: 1,
@@ -625,6 +622,7 @@ impl ContainerHeader {
 }
 
 pub const CONTAINER_HEADER_PACKAGE_SERIALIZED_SIZE: u64 = 0x20;
+pub const IO_PACKAGE_FEXPORTMAP_SERIALIZED_SIZE: u64 = 0x48; // TOOD: move to io_package.rs
 pub struct ContainerHeaderPackage {
     hash: u64,
     export_bundle_size: u64,
@@ -647,7 +645,7 @@ impl ContainerHeaderPackage {
         let export_bundle_offset = reader.read_u32::<E>().unwrap();
         //println!("0x{:X}, 0x{:X}", export_offset, export_bundle_offset);
         let graph_offset = reader.read_u32::<E>().unwrap();
-        let export_count = (export_bundle_offset - export_offset) / 0x20;
+        let export_count = (export_bundle_offset - export_offset) / IO_PACKAGE_FEXPORTMAP_SERIALIZED_SIZE as u32;
         reader.seek(SeekFrom::Start(export_bundle_offset as u64 + 4)); // FExportBundleHeader->EntryCount
         let export_bundle_count_serialized = reader.read_u32::<E>().unwrap();
         let export_bundle_count = export_bundle_count_serialized - export_count;
