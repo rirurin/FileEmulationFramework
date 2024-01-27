@@ -548,11 +548,14 @@ pub struct IoStoreTocEntryMeta {
 
 impl IoStoreTocEntryMeta {
     pub fn new(buffer: &Vec<u8>) -> Self {
+        /* 
         let mut hasher = Sha1::new();
         hasher.update(buffer);
         let mut data: Cursor<[u8; 0x20]> = Cursor::new([0; 0x20]);
         data.write_all(&hasher.finalize().to_vec());
         let hash = data.into_inner();
+        */
+        let hash = [0; 0x20];
 
         let flags = 0;
         Self { hash, flags }
@@ -669,7 +672,8 @@ impl ContainerHeaderPackage {
     pub fn to_buffer_store_entry<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W, base_offset: u64, curr_offset: &mut u64) -> Result<(), Box<dyn Error>> {
         writer.write_u64::<E>(self.export_bundle_size)?; // 0x0
         writer.write_u32::<E>(self.export_count)?; // 0x8
-        writer.write_u32::<E>(self.export_bundle_count)?; // 0xc
+        //writer.write_u32::<E>(self.export_bundle_count)?; // 0xc
+        writer.write_u32::<E>(1)?; // 0xc
         writer.write_u32::<E>(self.load_order)?; // 0x10
         writer.write_u32::<E>(0)?; // 0x14 padding
         let relative_offset = if self.import_ids.len() > 0 { Some((base_offset + *curr_offset - writer.stream_position().unwrap()) as u32) } else { None };

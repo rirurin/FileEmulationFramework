@@ -1,4 +1,7 @@
 ﻿using FileEmulationFramework.Interfaces;
+using FileEmulationFramework.Interfaces.Reference;
+using FileEmulationFramework.Lib.IO;
+using FileEmulationFramework.Lib.IO.Struct;
 using FileEmulationFramework.Lib.Utilities;
 using System;
 using System.Collections.Concurrent;
@@ -38,7 +41,6 @@ namespace UTOC.Stream.Emulator
             //_logger.Debug($"TryCreateFile: Create a custom UTOC for {filepath}");
 
             if (!TryCreateEmulatedFile(handle, filepath, filepath, filepath, ref emulated!, out _)) return false;
-            //_logger.Debug($"TryCreateFile: Successfully created a custom UTOC: {filepath}");
             return true;
         }
 
@@ -54,12 +56,25 @@ namespace UTOC.Stream.Emulator
         /// <returns>True if an emulated file could be created, false otherwise</returns>
         public bool TryCreateEmulatedFile(IntPtr handle, string srcDataPath, string outputPath, string route, ref IEmulatedFile? emulated, out System.IO.Stream? stream)
         {
-            // Check if there's a known route for this file, put this before actual file check because I/O
-            // Check file type
-            // Make the table of contents (UTOC) and partition (UCAS)
-            var result = RustApi.BuildTableOfContents(handle, srcDataPath, outputPath, route);
             stream = null;
-            return result;
+            long length = 0;
+
+            _pathToStream[outputPath] = null; // Avoid recursion into the same file
+            // Make the table of contents (UTOC) and partition (UCAS)
+            var result = RustApi.BuildTableOfContents(handle, srcDataPath, outputPath, route, ref length);
+            if (result == IntPtr.Zero) return false;
+
+            //_logger.Debug($"Created TOC stream at 0x{result:X} of length 0x{length:X}");
+            byte[] stream_managed = new byte[length];
+            Marshal.Copy(result, stream_managed, 0, (int)length);
+            stream = new MemoryStream(stream_managed);
+            emulated = new EmulatedFile<System.IO.Stream>(stream);
+            _logger.Info($"[UtocEmulator] Created Emulated file with Path {outputPath}");
+            /* TODO
+            if (DumpFiles)
+                DumpFile(route, stream)
+            */
+            return true;
         }
 
         public void OnModLoading(string dir_path) => RustApi.AddFromFolders(dir_path);

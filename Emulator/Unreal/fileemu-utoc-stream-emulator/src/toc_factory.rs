@@ -472,7 +472,7 @@ impl TocResolver {
         }
     }
 
-    pub fn serialize(&mut self, handle: HANDLE, toc_path: &str, part_path: &str) {
+    pub fn serialize(&mut self, handle: HANDLE, toc_path: &str, part_path: &str) -> Vec<u8> {
         type CV = Cursor<Vec<u8>>;
         type EN = byteorder::NativeEndian;
         //println!("Create TOC for {}, partition at {}", toc_path, part_path);
@@ -571,6 +571,8 @@ impl TocResolver {
         // TODO: figure out how to hook this up to FileEmulationFramework properly
         // This won't currently work when run through Reloaded, but does work with toc-builder-test
         let toc_inner = toc_storage.into_inner();
+        toc_inner
+        /* 
         let result = unsafe {
             FileSystem::WriteFile(
                 handle,
@@ -583,6 +585,7 @@ impl TocResolver {
             Ok(_) => println!("Wrote 0x{:X} bytes into {}", toc_length, toc_path),
             Err(e) => println!("ERROR: Couldn't write to TOC file {} reason: {}", toc_path, e.to_string())
         }
+        */
         /* Use NT file handle + Win32 write instead of std::fs
         match fs::write(toc_path, &toc_storage.into_inner()) {
             Ok(_) => println!("Wrote 0x{:X} bytes into {}", toc_length, toc_path),
@@ -595,7 +598,7 @@ impl TocResolver {
 // TODO: Set the mount point further up in mods where the file structure doesn't diverge at root
 // TODO: Pass version param (probably as trait) to customize how TOC is produced depenending on the target version
 // TODO: Handle creating multiple partitions (not important but would help make this more feature complete)
-pub fn build_table_of_contents2(handle: HANDLE, root: Rc<TocDirectory2>, toc_path: &str, part_path: &str) {
+pub fn build_table_of_contents2(handle: HANDLE, root: Rc<TocDirectory2>, toc_path: &str, part_path: &str) -> Vec<u8> {
     println!("BUILD TABLE OF CONTENTS FOR UnrealEssentials_P.utoc");
     // flatten our tree into a list by pre-order traversal
     let toc_time = Instant::now();
@@ -604,10 +607,11 @@ pub fn build_table_of_contents2(handle: HANDLE, root: Rc<TocDirectory2>, toc_pat
     let mut resolver = TocResolver::new(&root.name);
     resolver.flatten_toc_tree_2(Rc::clone(&root));
     flatten_time = toc_time.elapsed().as_micros();
-    resolver.serialize(handle, toc_path, part_path);
+    let toc_stream = resolver.serialize(handle, toc_path, part_path);
     serialize_time = toc_time.elapsed().as_micros() - flatten_time;
     println!("Flatten Time: {} ms", flatten_time as f64 / 1000f64);
     println!("Serialize Time: {} ms", serialize_time as f64 / 1000f64);
+    toc_stream
 
 }
 

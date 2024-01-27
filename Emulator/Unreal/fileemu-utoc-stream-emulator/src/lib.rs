@@ -46,6 +46,7 @@ pub const TARGET_TOC:                         &'static str = "UnrealEssentials_P
 // Root TOC directory (needs to be global)
 //pub static mut ROOT_DIRECTORY: Option<TocDirectory> = None;
 pub static mut ROOT_DIRECTORY: Option<Rc<TocDirectory2>> = None;
+pub static mut TOC_STREAM: Vec<u8> = vec![];
 
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -75,19 +76,28 @@ pub fn add_from_folders(mod_path: &str) {
 #[no_mangle]
 #[allow(non_snake_case)]
 // haiiii Reloaded!!!! :3
-pub unsafe extern "C" fn BuildTableOfContents(handle: HANDLE, srcDatPath: *const c_char, outputPath: *const c_char, route: *const c_char) -> bool {
+pub unsafe extern "C" fn BuildTableOfContents(handle: HANDLE, srcDatPath: *const c_char, outputPath: *const c_char, route: *const c_char, length: *mut u64) -> *const u8 {
     let toc_file_location_ffi = CStr::from_ptr(srcDatPath).to_str().unwrap(); // [mod_file_path]/[file_emu_folder]/UnrealEssentials_P.utoc
     let cas_file_location = toc_file_location_ffi.strip_suffix(".utoc").unwrap().to_owned() + PARTITION_EXTENSION;
-    println!("TOC FILE LOCATION: {}, CAS FILE LOCATION: {}", toc_file_location_ffi, cas_file_location);
-    build_table_of_contents(handle, toc_file_location_ffi, &cas_file_location)
+    match build_table_of_contents(handle, toc_file_location_ffi, &cas_file_location) {
+        Some(n) => {
+            unsafe {
+                TOC_STREAM = n; // move vector pointer into TOC_STREAM to stop it from dropping
+                *length = TOC_STREAM.len() as u64; // set length parameter
+            }
+            TOC_STREAM.as_ptr()
+        },
+        None => 0 as *const u8 // send a null pointer :naosmiley:
+    }
 }
 
-pub fn build_table_of_contents(handle: HANDLE, toc_path: &str, part_path: &str) -> bool {
+pub fn build_table_of_contents(handle: HANDLE, toc_path: &str, part_path: &str) -> Option<Vec<u8>> {
     // build TOC here
     let path_check = PathBuf::from(toc_path);
     let file_name = path_check.file_name().unwrap().to_str().unwrap(); // unwrap, this is a file
-    println!("call build_toc on dummy toc {}", file_name);
+    // check that we're targeting the correct UTOC
     if file_name == TARGET_TOC {
+        println!("call build_toc on dummy toc {}", file_name);
         match unsafe { &ROOT_DIRECTORY } {
             Some(root) => {
                 println!("Mod files were loaded for {}", file_name);
@@ -97,17 +107,16 @@ pub fn build_table_of_contents(handle: HANDLE, toc_path: &str, part_path: &str) 
                     toc_factory::print_contents2(Rc::clone(&root), &mut dir_count, &mut file_count);
                     println!("{} DIRECTORIES, {} FILES", dir_count, file_count);
                 }
-                toc_factory::build_table_of_contents2(handle, Rc::clone(root), toc_path, part_path);
-                false
+                Some(toc_factory::build_table_of_contents2(handle, Rc::clone(root), toc_path, part_path))
             },
             None => {
                 println!("WARNING: No mod files were loaded for {}", file_name);
-                false
+                None
             }
         }
     } else {
         // Not our target TOC
-        false
+        None
     }
 }
 
