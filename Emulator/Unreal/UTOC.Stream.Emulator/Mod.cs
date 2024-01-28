@@ -88,7 +88,7 @@ namespace UTOC.Stream.Emulator
         }
         private void OnModLoading(IModV1 mod, IModConfigV1 conf)
         {
-            _emu.OnModLoading(_modLoader.GetDirectoryForModId(conf.ModId));
+            _emu.OnModLoading(conf.ModId, _modLoader.GetDirectoryForModId(conf.ModId));
         }
         private void OnModUnloading(IModV1 mod, IModConfigV1 conf)
         {

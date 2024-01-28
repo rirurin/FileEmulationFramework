@@ -495,7 +495,10 @@ pub struct IoFileIndexEntry {
     pub name: u32, // entry to string index
     pub next_file: u32,
     pub user_data: u32, // id for FIoChunkId, and FIoOffsetAndLength
-    pub os_path: String // THIS WILL NOT GET SERIALIZED
+    // NOT SERIALIZED
+    pub file_size: u64,
+    pub os_path: String,
+    pub hash_path: String,
 }
 
 impl IoFileIndexEntry {
@@ -547,19 +550,28 @@ pub struct IoStoreTocEntryMeta {
 }
 
 impl IoStoreTocEntryMeta {
-    pub fn new(buffer: &Vec<u8>) -> Self {
-        /* 
+    // Generate a new meta entry with no hash. This doesn't seem to be required to create a valid TOC
+    pub fn new_empty() -> Self {
+        Self::new_inner([0; 0x20])
+    }
+    // Used for situations where it's required to generate a new TOC. This requires reading the entire contents of every file and creating a SHA1
+    // hash for it, which is a very slow operation. If this is *required* for any game, a cache will be created to store previously calculated hashes
+    // (I tested this on a blank UE project and had a serialization time of about 130 ms for 1 file)
+    pub fn new_with_hash(buffer: &Vec<u8>) -> Self {
         let mut hasher = Sha1::new();
         hasher.update(buffer);
         let mut data: Cursor<[u8; 0x20]> = Cursor::new([0; 0x20]);
         data.write_all(&hasher.finalize().to_vec());
         let hash = data.into_inner();
-        */
+        Self::new_inner(hash)
+    }
+    #[inline]
+    fn new_inner(hash: [u8; 32]) -> Self {
         let hash = [0; 0x20];
-
         let flags = 0;
         Self { hash, flags }
     }
+
     pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
         writer.write_all(self.hash.as_slice())?;
         writer.write_u8(self.flags)?;
@@ -575,7 +587,7 @@ impl IoStoreTocEntryMeta {
 
 pub struct ContainerHeader {
     container_id: u64,
-    pub packages: Vec<ContainerHeaderPackage>,
+    pub packages: Vec<crate::io_package::ContainerHeaderPackage>,
 }
 impl ContainerHeader {
     // Write package header data into ucas
@@ -601,10 +613,10 @@ impl ContainerHeader {
         container_header_writer.write_u64::<E>(crate::string::NAME_HASH_ALGORITHM)?;
         container_header_writer.write_u32::<E>(self.packages.len() as u32)?; // TArray<FPackageId> PackageIds
         for i in &self.packages {
-            container_header_writer.write_u64::<E>(i.hash)?;
+            //container_header_writer.write_u64::<E>(i.hash)?;
         }
         println!("Written {} package ids into container header", self.packages.len());
-        let import_list_base_offset = CONTAINER_HEADER_PACKAGE_SERIALIZED_SIZE * self.packages.len() as u64; // TArray->data, len is written further down
+        let import_list_base_offset = crate::io_package::CONTAINER_HEADER_PACKAGE_SERIALIZED_SIZE * self.packages.len() as u64; // TArray->data, len is written further down
         let mut import_list_already_written_offset = 0;
         let mut store_entry_writer: Cursor<Vec<u8>> = Cursor::new(vec![]);
         for i in &self.packages {
@@ -621,73 +633,5 @@ impl ContainerHeader {
         writer.seek(SeekFrom::Current(-1));
         writer.write(&[0x0])?;
         Ok(serialized)
-    }
-}
-
-pub const CONTAINER_HEADER_PACKAGE_SERIALIZED_SIZE: u64 = 0x20;
-pub const IO_PACKAGE_FEXPORTMAP_SERIALIZED_SIZE: u64 = 0x48; // TOOD: move to io_package.rs
-pub struct ContainerHeaderPackage {
-    hash: u64,
-    export_bundle_size: u64,
-    export_count: u32,
-    export_bundle_count: u32,
-    load_order: u32,
-    import_ids: Vec<u64>
-}
-
-impl ContainerHeaderPackage {
-    // Do a very incomplete serialization of an IO Store packaged asset to obtain it's export count, export bundle count and imported packages
-    // Imports are Header.ExportMapOffset - Header.ImportMapOffset / 8
-    // Export count is Header.ExportBundlesOffset - Header.ExportMapOffset) / sizeof(FExportMapEntry)
-    // Export bundle count is export bundle count - export count
-    // imported packages count determined (grab the hash from there and copy that)
-    // Later, this code can do a more full serialization
-    pub fn from_header_package<R: Read + Seek, E: byteorder::ByteOrder>(reader: &mut R, hash: u64, size: u64) -> Self { // beginning of IO store package
-        reader.seek(SeekFrom::Start(0x2c));
-        let export_offset = reader.read_u32::<E>().unwrap();
-        let export_bundle_offset = reader.read_u32::<E>().unwrap();
-        //println!("0x{:X}, 0x{:X}", export_offset, export_bundle_offset);
-        let graph_offset = reader.read_u32::<E>().unwrap();
-        let export_count = (export_bundle_offset - export_offset) / IO_PACKAGE_FEXPORTMAP_SERIALIZED_SIZE as u32;
-        reader.seek(SeekFrom::Start(export_bundle_offset as u64 + 4)); // FExportBundleHeader->EntryCount
-        let export_bundle_count_serialized = reader.read_u32::<E>().unwrap();
-        let export_bundle_count = export_bundle_count_serialized - export_count;
-        reader.seek(SeekFrom::Start(graph_offset as u64)); // FGraphPackage->ImportedPackagesCount
-        let imported_package_count = reader.read_u32::<E>().unwrap();
-        let mut import_ids: Vec<u64> = Vec::with_capacity(imported_package_count as usize);
-        for _ in 0..imported_package_count {
-            import_ids.push(FGraphPackage::from_buffer::<R, E>(reader).imported_package_id);
-        }
-        let load_order = 0; // For now, we'll see if this makes things crash
-        Self {
-            hash,
-            export_bundle_size: size,
-            export_count,
-            export_bundle_count,
-            load_order,
-            import_ids
-        }
-    }
-
-    pub fn to_buffer_store_entry<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W, base_offset: u64, curr_offset: &mut u64) -> Result<(), Box<dyn Error>> {
-        writer.write_u64::<E>(self.export_bundle_size)?; // 0x0
-        writer.write_u32::<E>(self.export_count)?; // 0x8
-        //writer.write_u32::<E>(self.export_bundle_count)?; // 0xc
-        writer.write_u32::<E>(1)?; // 0xc
-        writer.write_u32::<E>(self.load_order)?; // 0x10
-        writer.write_u32::<E>(0)?; // 0x14 padding
-        let relative_offset = if self.import_ids.len() > 0 { Some((base_offset + *curr_offset - writer.stream_position().unwrap()) as u32) } else { None };
-        writer.write_u32::<E>(self.import_ids.len() as u32)?; // 0x18 ImportedPackageCount
-        writer.write_u32::<E>(match relative_offset {Some(n) => n, None => 0})?; // 0x1c RelativeOffsetToImports
-        if let Some(rel) = relative_offset {
-            let return_ptr = writer.stream_position().unwrap();
-            writer.seek(SeekFrom::Current(rel as i64 - 8));
-            for i in &self.import_ids {
-                writer.write_u64::<E>(*i)?;
-            }
-            writer.seek(SeekFrom::Start(return_ptr));
-            *curr_offset += 8 * self.import_ids.len() as u64;
-        }
-        Ok(())
     }
 }

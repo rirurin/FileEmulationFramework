@@ -16,6 +16,7 @@ namespace UTOC.Stream.Emulator
     public class UtocEmulator : IEmulator
     {
         public static readonly string UtocExtension = ".utoc";
+        public static readonly string UcasExtension = ".ucas";
         public bool DumpFiles { get; set; }
         public Logger _logger { get; init; }
         private readonly ConcurrentDictionary<string, System.IO.Stream?> _pathToStream = new(StringComparer.OrdinalIgnoreCase);
@@ -33,7 +34,19 @@ namespace UTOC.Stream.Emulator
                 return false;
             }
             // Check extension
-            if (!filepath.EndsWith(UtocExtension, StringComparison.OrdinalIgnoreCase)) return false;
+            if (filepath.EndsWith(UtocExtension, StringComparison.OrdinalIgnoreCase))
+            {
+                // can continue...
+            }
+            else if (filepath.EndsWith(UcasExtension, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.Info($"[UtocEmulator] TryCreateFile was called on a UCAS: {filepath}");
+                return false;
+            }
+            else
+            {
+                return false;
+            }
 
             // Check that the target file isn't the game's UTOC
             // We're interested in creating a patch UTOC
@@ -77,6 +90,6 @@ namespace UTOC.Stream.Emulator
             return true;
         }
 
-        public void OnModLoading(string dir_path) => RustApi.AddFromFolders(dir_path);
+        public void OnModLoading(string mod_id, string dir_path) => RustApi.AddFromFolders(mod_id, dir_path);
     }
 }
