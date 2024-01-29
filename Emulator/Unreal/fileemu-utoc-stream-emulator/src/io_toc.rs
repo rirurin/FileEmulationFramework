@@ -3,10 +3,11 @@ use byteorder::{ReadBytesExt, WriteBytesExt};
 use crate::{
     io_package::FGraphPackage,
     string::{FString32NoHash, FStringSerializer, Hasher, Hasher16},
-    toc_factory::{PartitionSerializer, PartitionSerializerAlign}
 };
+#[cfg(feature = "hash_meta")]
 use sha1::{Sha1, Digest};
 use std::{
+    cmp::Ordering,
     error::Error,
     io::{Cursor, Read, Seek, SeekFrom, Write}
 };
@@ -71,27 +72,9 @@ bitflags! {
 
 pub const IO_STORE_TOC_MAGIC: [u8; 0x10] = *b"-==--==--==--==-";
 
-pub enum IoStoreToc {
-    Initial(IoStoreTocHeaderType1),
-    DirectoryIndex(IoStoreTocHeaderType1),
-    PartitionSize(IoStoreTocHeaderType1),
-    PerfectHash(IoStoreTocHeaderType1)
-}
-
-impl IoStoreToc {
-    pub fn new<N: AsRef<str>>(ver: IoStoreTocVersion, name: N, entries: u32)  -> IoStoreToc {
-        match ver {
-            IoStoreTocVersion::Initial => IoStoreToc::Initial(IoStoreTocHeaderType1::new(name, entries)),
-            IoStoreTocVersion::DirectoryIndex => IoStoreToc::DirectoryIndex(IoStoreTocHeaderType1::new(name, entries)),
-            IoStoreTocVersion::PartitionSize => IoStoreToc::PartitionSize(IoStoreTocHeaderType1::new(name, entries)),
-            IoStoreTocVersion::PerfectHash | 
-            IoStoreTocVersion::PerfectHashWithOverflow => IoStoreToc::PerfectHash(IoStoreTocHeaderType1::new(name, entries)),
-            _ => panic!("Invalid TOC store type"),
-        }
-    }
-    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
-        Ok(())
-    }
+pub trait IoStoreTocHeaderCommon {
+    fn new(container_id: u64, entries: u32, compressed_blocks: u32, compression_block_size: u32, dir_index_size: u32) -> impl IoStoreTocHeaderCommon;
+    fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>>;
 }
 
 #[repr(C)]
@@ -104,11 +87,11 @@ pub struct IoStoreTocHeaderType1 { // Unreal Engine 4.25 (size: 0x80) (unverifie
 }
 
 impl IoStoreTocHeaderType1 {
-    fn new<N: AsRef<str>>(name: N, entries: u32) -> IoStoreTocHeaderType1 {
+    fn new(entries: u32) -> IoStoreTocHeaderType1 {
         let toc_magic: [u8; 0x10] = IO_STORE_TOC_MAGIC;
-        let toc_header_size = std::mem::size_of::<IoStoreTocHeaderType1>() as u32;
+        let toc_header_size = std::mem::size_of::<Self>() as u32;
         let toc_entry_count = entries;
-        let toc_entry_size = 0;
+        let toc_entry_size = 0x16;
         let toc_pad = [0; 25];
         IoStoreTocHeaderType1 {
             toc_magic,
@@ -121,7 +104,7 @@ impl IoStoreTocHeaderType1 {
 }
 
 #[repr(C)]
-pub struct IoStoreTocHeaderType2 { // Unreal Engine 4.25+ (Scarlet Nexus), 4.26 
+pub struct IoStoreTocHeaderType2 { // Unreal Engine 4.25+, 4.26 
     toc_magic: [u8; 0x10],
     version: IoStoreTocVersion,
     toc_header_size: u32,
@@ -138,8 +121,51 @@ pub struct IoStoreTocHeaderType2 { // Unreal Engine 4.25+ (Scarlet Nexus), 4.26
     reserved: [u32; 15]
 }
 
+impl IoStoreTocHeaderCommon for IoStoreTocHeaderType2 {
+    fn new(container_id: u64, entries: u32, compressed_blocks: u32, compression_block_size: u32, dir_index_size: u32) -> impl IoStoreTocHeaderCommon {
+        Self {
+            toc_magic: IO_STORE_TOC_MAGIC,
+            version: IoStoreTocVersion::DirectoryIndex,
+            toc_header_size: std::mem::size_of::<Self>() as u32,
+            toc_entry_count: entries,
+            toc_compressed_block_entry_count: compressed_blocks,
+            toc_compressed_block_entry_size: std::mem::size_of::<IoStoreTocCompressedBlockEntry>() as u32, // for sanity checking
+            compression_method_name_count: 0,
+            compression_method_name_length: 32,
+            compression_block_size,
+            directory_index_size: dir_index_size,
+            container_id,
+            encryption_key_guid: 0,
+            container_flags: IoContainerFlags::Indexed,
+            reserved: [0; 15]
+        }
+    }
+    fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+        writer.write_all(self.toc_magic.as_slice())?; // 0x0
+        writer.write_u8(self.version.into())?;
+        writer.write_u24::<E>(0)?; // padding
+        writer.write_u32::<E>(self.toc_header_size)?;
+        writer.write_u32::<E>(self.toc_entry_count)?;
+        writer.write_u32::<E>(self.toc_compressed_block_entry_count)?;
+        writer.write_u32::<E>(self.toc_compressed_block_entry_size)?;
+        writer.write_u32::<E>(self.compression_method_name_count)?;
+        writer.write_u32::<E>(self.compression_method_name_length)?;
+        writer.write_u32::<E>(self.compression_block_size)?;
+        writer.write_u32::<E>(self.directory_index_size)?;
+        writer.write_u32::<E>(0)?; // padding
+        writer.write_u64::<E>(self.container_id)?;
+        writer.write_u128::<E>(self.encryption_key_guid)?;
+        writer.write_u8(self.container_flags.bits())?;
+        writer.write_u24::<E>(0)?; // padding
+        for _ in 0..15 {
+            writer.write_u64::<E>(0)?; // padding
+        }
+        Ok(())
+    }
+}
+
 #[repr(C)]
-pub struct IoStoreTocHeaderType3 { // Unreal Engine 4.27 (size: 0x90)
+pub struct IoStoreTocHeaderType3 { // Unreal Engine 4.27
     toc_magic: [u8; 0x10],
     version: IoStoreTocVersion,
     toc_header_size: u32,
@@ -158,12 +184,12 @@ pub struct IoStoreTocHeaderType3 { // Unreal Engine 4.27 (size: 0x90)
     reserved: [u64; 6]
 }
 
-impl IoStoreTocHeaderType3 {
-    pub fn new(container_id: u64, entries: u32, compressed_blocks: u32, compression_block_size: u32, dir_index_size: u32) -> Self {
+impl IoStoreTocHeaderCommon for IoStoreTocHeaderType3 {
+    fn new(container_id: u64, entries: u32, compressed_blocks: u32, compression_block_size: u32, dir_index_size: u32) -> impl IoStoreTocHeaderCommon {
         Self {
             toc_magic: IO_STORE_TOC_MAGIC,
             version: IoStoreTocVersion::PartitionSize,
-            toc_header_size: std::mem::size_of::<IoStoreTocHeaderType3>() as u32,
+            toc_header_size: std::mem::size_of::<Self>() as u32,
             toc_entry_count: entries,
             toc_compressed_block_entry_count: compressed_blocks,
             toc_compressed_block_entry_size: std::mem::size_of::<IoStoreTocCompressedBlockEntry>() as u32, // for sanity checking
@@ -179,7 +205,7 @@ impl IoStoreTocHeaderType3 {
             reserved: [0; 6]
         }
     }
-    pub fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
+    fn to_buffer<W: Write + Seek, E: byteorder::ByteOrder>(&self, writer: &mut W) -> Result<(), Box<dyn Error>> {
         writer.write_all(self.toc_magic.as_slice())?; // 0x0
         writer.write_u8(self.version.into())?;
         writer.write_u24::<E>(0)?; // padding
@@ -228,7 +254,7 @@ pub struct IoStoreTocHeaderType4 { // Unreal Engine 5.0+ (size: 0x90)
 }
 
 // IO CHUNK ID
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
 #[repr(u8)]
 #[allow(dead_code)]
 pub enum IoChunkType4 {     
@@ -281,7 +307,7 @@ impl From<IoChunkType4> for u8 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
 #[repr(u8)]
 #[allow(dead_code)]
 pub enum IoChunkType5 {
@@ -343,8 +369,23 @@ impl From<IoChunkType5> for u8 {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
-#[repr(C/* , align(4)*/)] // This is the same across all versions of IO Store UE that i'm aware of
+#[derive(Debug)]
+pub struct TocEntry { // For Unreal Engine 4.25
+    chunk_id: IoChunk1,
+    offset_length: IoOffsetAndLength
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[repr(C)]
+pub struct IoChunk1 { // For Unreal Engine 4.25
+    // data: [u8; 0xc]
+    global_package_id: u32,
+    chunk_index: u16,
+    obj_type: IoChunkType4
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[repr(C/* , align(4)*/)] // Unreal Engine 4.25+ onwards
 pub struct IoChunkId {
     //id: [u8; 0xc]
     hash: u64,
@@ -387,7 +428,7 @@ impl IoChunkId {
 } 
 
 // IO OFFSET + LENGTH
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 #[repr(C)]
 pub struct IoOffsetAndLength {
     data: [u8; 0xa]
@@ -557,6 +598,7 @@ impl IoStoreTocEntryMeta {
     // Used for situations where it's required to generate a new TOC. This requires reading the entire contents of every file and creating a SHA1
     // hash for it, which is a very slow operation. If this is *required* for any game, a cache will be created to store previously calculated hashes
     // (I tested this on a blank UE project and had a serialization time of about 130 ms for 1 file)
+    #[cfg(feature = "hash_meta")]
     pub fn new_with_hash(buffer: &Vec<u8>) -> Self {
         let mut hasher = Sha1::new();
         hasher.update(buffer);
@@ -613,7 +655,7 @@ impl ContainerHeader {
         container_header_writer.write_u64::<E>(crate::string::NAME_HASH_ALGORITHM)?;
         container_header_writer.write_u32::<E>(self.packages.len() as u32)?; // TArray<FPackageId> PackageIds
         for i in &self.packages {
-            //container_header_writer.write_u64::<E>(i.hash)?;
+            container_header_writer.write_u64::<E>(i.hash)?;
         }
         println!("Written {} package ids into container header", self.packages.len());
         let import_list_base_offset = crate::io_package::CONTAINER_HEADER_PACKAGE_SERIALIZED_SIZE * self.packages.len() as u64; // TArray->data, len is written further down
@@ -629,9 +671,9 @@ impl ContainerHeader {
         container_header_writer.write_u32::<E>(0)?; // PackageRedirectss
         let serialized = container_header_writer.into_inner();
         writer.write_all(&serialized); // Write into main buffer, then align to the nearest 0x10
-        PartitionSerializer::new(0x10).to_buffer_alignment::<W, E>(writer);
-        writer.seek(SeekFrom::Current(-1));
-        writer.write(&[0x0])?;
+        //PartitionSerializer::new(0x10).to_buffer_alignment::<W, E>(writer);
+        //writer.seek(SeekFrom::Current(-1));
+        //writer.write(&[0x0])?;
         Ok(serialized)
     }
 }

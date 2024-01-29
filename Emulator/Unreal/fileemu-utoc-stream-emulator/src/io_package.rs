@@ -12,7 +12,8 @@ type ExportFilterFlags = u8; // and this one too...
 use byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
 use crate::{
     pak_package::{FObjectImport, FObjectExport, GameName, NameMap},
-    string::FMappedName
+    string::FMappedName,
+    toc_factory::{TocResolverCommon, TocResolverType2}
 };
 use std::{
     error::Error,
@@ -350,11 +351,37 @@ pub struct ExportBundleHeader5 { // Unreal Engine 5.0+
 }
 // impl ExportBundle for ExportBundleHeader5...
 
+pub trait ContainerHeaderPosition {
+    fn cursor_to_header<TResolver: TocResolverCommon>(resolver: &mut TResolver) -> u64;
+    fn cursor_to_beginning_of_files<TResolver: TocResolverCommon>(resolver: &mut TResolver) -> u64;
+    //fn get_fixed_container_size<TResolver: TocResolverCommon>(resolver: &mut TResolver) -> u64; // 4.25+ and 4.26 have a fixed size of 0x10000
+}
+
+pub struct ContainerHeaderPosition1; // 4.25+, 4.26
+impl ContainerHeaderPosition for ContainerHeaderPosition1 {
+    fn cursor_to_beginning_of_files<TResolver: TocResolverCommon>(resolver: &mut TResolver) -> u64 {
+        0x10000
+    }
+    fn cursor_to_header<TResolver: TocResolverCommon>(resolver: &mut TResolver) -> u64 {
+        0
+    }
+}
+
+pub struct ContainerHeaderPosition2; // 4.27
+impl ContainerHeaderPosition for ContainerHeaderPosition2 {
+    fn cursor_to_beginning_of_files<TResolver: TocResolverCommon>(resolver: &mut TResolver) -> u64 {
+        0
+    }
+    fn cursor_to_header<TResolver: TocResolverCommon>(resolver: &mut TResolver) -> u64 {
+        0 // self.compression_blocks
+    }
+}
+
 pub const CONTAINER_HEADER_PACKAGE_SERIALIZED_SIZE: u64 = 0x20;
 pub const IO_PACKAGE_FEXPORTMAP_SERIALIZED_SIZE: u64 = 0x48;
 pub struct ContainerHeaderPackage {
     // An export bundle's entry in a container header
-    hash: u64,
+    pub hash: u64,
     export_bundle_size: u64,
     export_count: u32,
     export_bundle_count: u32,
@@ -383,7 +410,6 @@ impl ContainerHeaderPackage {
             import_ids.push(i.imported_package_id);
         }
         let load_order = 0; // This doesn't seem to matter?
-        let hash: u64 = 0;
         Self {
             hash,
             export_bundle_size: size,

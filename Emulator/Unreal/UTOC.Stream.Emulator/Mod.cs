@@ -64,12 +64,9 @@ namespace UTOC.Stream.Emulator
 
             // If you want to implement e.g. unload support in your mod,
             // and some other neat features, override the methods in ModBase.
-
-            // TODO: Implement some mod logic
-
-            _log = new Logger(_logger, LogSeverity.Debug);
+            _log = new Logger(_logger, _configuration.LogLevel);
             _log.Info("Starting UTOC.Stream.Emulator");
-            _emu = new UtocEmulator(_log);
+            _emu = new UtocEmulator(_log, _configuration.DumpFiles);
 
             _modLoader.ModLoading += OnModLoading;
             _modLoader.ModUnloading += OnModUnloading;
@@ -85,6 +82,7 @@ namespace UTOC.Stream.Emulator
             _modLoader.OnModLoaderInitialized -= OnLoaderInit;
             _modLoader.ModLoading -= OnModLoading;
             _modLoader.ModUnloading -= OnModUnloading;
+            _emu.OnLoaderInit();
         }
         private void OnModLoading(IModV1 mod, IModConfigV1 conf)
         {

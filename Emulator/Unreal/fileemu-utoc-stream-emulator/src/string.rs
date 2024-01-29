@@ -62,15 +62,6 @@ fn to_buffer_alignment_super<
     writer.seek(SeekFrom::Current(diff as i64));
 }
 
-#[derive(Debug)]
-pub struct UnrealStringError(&'static str);
-impl fmt::Display for UnrealStringError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Error handling package string: {}", self.0)
-    }
-}
-impl Error for UnrealStringError {}
-
 pub const NAME_HASH_ALGORITHM: u64 = 0xC1640000; // FNameHash::AlgorithmId
 
 #[allow(dead_code)]
